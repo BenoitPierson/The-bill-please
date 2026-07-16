@@ -5,3 +5,6 @@ __pycache__/
 venv/
 *.xlsx
 *.log
+
+# Vraies factures deposees localement pour les tests — ne jamais versionner
+Factures*/

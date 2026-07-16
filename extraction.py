@@ -27,13 +27,22 @@ INVOICE_SCHEMA = {
         },
         "invoice_number": {
             "type": "string",
-            "description": "Invoice number / reference exactly as printed or written.",
+            "description": (
+                "The invoice number (e.g. labeled 'Invoice Number', 'CV Invoice Number', "
+                "'Numero de facture'), exactly as printed or written. This is NOT the same "
+                "as a 'Receipt Number' — if both appear on the document, use the invoice "
+                "number and ignore the receipt number."
+            ),
         },
         "invoice_date": {
             "type": "string",
             "description": (
-                "Invoice date normalized to YYYY-MM-DD if it can be determined "
-                "unambiguously; otherwise the date exactly as written on the invoice."
+                "Invoice date, ALWAYS normalized to YYYY-MM-DD (e.g. 2026-03-05), "
+                "regardless of how it was originally written (DD/MM/YYYY, MM/DD/YYYY, "
+                "'5 mars 2026', 'March 5, 2026', etc.). Never return the raw/original "
+                "format. If the day/month order is genuinely ambiguous, make the best "
+                "guess from context (invoice language/country, other dates on the "
+                "document) and flag the uncertainty in extraction_notes."
             ),
         },
         "total_amount": {
@@ -72,7 +81,7 @@ organisees sous forme de tableau (lignes d'articles, recapitulatif des totaux, e
 
 Analyse attentivement toutes les images fournies (y compris les tableaux) et extrait :
 - le nom du fournisseur (l'entreprise ou la personne qui EMET la facture, pas le client) ;
-- le numero de facture ;
+- le numero de facture (INVOICE NUMBER) ;
 - la date de la facture ;
 - le montant total TTC ;
 - la devise ;
@@ -82,13 +91,22 @@ Regles importantes :
 - Les montants doivent etre des nombres (pas de texte, pas de symbole monetaire), avec un \
 point comme separateur decimal. Convertis les formats europeens ("1 234,56" ou "1.234,56") \
 en nombre standard (1234.56).
-- Normalise la date au format AAAA-MM-JJ si elle est determinable sans ambiguite ; sinon \
-recopie-la telle qu'ecrite.
+- La date de facture doit TOUJOURS etre convertie au format AAAA-MM-JJ (ex: 2026-03-05), \
+quel que soit son format d'origine (JJ/MM/AAAA, MM/JJ/AAAA, "5 mars 2026", "March 5, 2026", \
+etc.) : ne renvoie jamais la date telle qu'ecrite sur la facture. Si l'ordre jour/mois est \
+reellement ambigu, deduis-le du contexte (langue/pays de la facture, autres dates presentes \
+sur le document) et signale ton incertitude dans extraction_notes plutot que de laisser le \
+format d'origine.
 - Sur une facture multi-pages, le total et la TVA se trouvent generalement dans le \
 recapitulatif final : verifie toutes les pages avant de conclure.
 - Si un champ est illisible, absent, ou incertain, mets null et explique brievement pourquoi \
 dans extraction_notes (mets null dans extraction_notes s'il n'y a rien a signaler).
-- Ne confonds jamais le fournisseur (emetteur) avec le client (destinataire) de la facture."""
+- Ne confonds jamais le fournisseur (emetteur) avec le client (destinataire) de la facture.
+- NE CONFONDS PAS le numero de facture (INVOICE NUMBER, parfois intitule "CV INVOICE NUMBER") \
+avec le RECEIPT NUMBER (numero de recu/reçu) : ce sont deux identifiants differents qui \
+peuvent tous les deux apparaitre sur le meme document. Le champ invoice_number doit \
+toujours contenir le numero de facture (INVOICE NUMBER / CV INVOICE NUMBER), jamais le \
+RECEIPT NUMBER, meme si le RECEIPT NUMBER est plus visible ou plus proche du haut de page."""
 
 USER_INSTRUCTION = (
     "Voici les pages d'une facture. Extrait les informations demandees au format JSON."

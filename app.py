@@ -23,7 +23,10 @@ _client: Optional[Anthropic] = None
 def get_client() -> Anthropic:
     global _client
     if _client is None:
-        _client = Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+        # max_retries=6: the SDK retries 429/5xx (including 529 "overloaded")
+        # with exponential backoff. The default of 2 attempts was not enough
+        # to ride out API load spikes, leaving invoices unprocessed.
+        _client = Anthropic(max_retries=6)  # reads ANTHROPIC_API_KEY from the environment
     return _client
 
 
@@ -66,4 +69,7 @@ async def process(files: List[UploadFile] = File(...)) -> Response:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+    # reload=False: auto-reload would watch the whole project directory,
+    # including .venv (tens of thousands of files), which is slow/unreliable
+    # to index on Windows and was causing the server to hang on startup.
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False)
