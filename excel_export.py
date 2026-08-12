@@ -10,6 +10,7 @@ from openpyxl.utils import get_column_letter
 from extraction import InvoiceResult
 
 HEADERS = [
+    "Archive",
     "Fichier",
     "Nom du fournisseur",
     "Numero de facture",
@@ -34,6 +35,7 @@ def build_workbook(results: list[InvoiceResult]) -> bytes:
     for r in results:
         ws.append(
             [
+                r.archive,
                 r.filename,
                 r.supplier_name,
                 r.invoice_number,
@@ -46,7 +48,7 @@ def build_workbook(results: list[InvoiceResult]) -> bytes:
             ]
         )
 
-    widths = [28, 28, 18, 16, 14, 10, 14, 40, 30]
+    widths = [30, 45, 28, 18, 16, 14, 10, 14, 40, 30]
     for i, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
 

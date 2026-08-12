@@ -1,7 +1,10 @@
 """Local web app: drag & drop invoices, extract data via Claude, download Excel."""
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Optional
 
@@ -11,11 +14,18 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from excel_export import build_workbook
-from extraction import process_upload
+from extraction import InvoiceResult, InvoiceSource, expand_upload, process_source
 
 load_dotenv()
 
+logger = logging.getLogger("uvicorn.error")
+
 app = FastAPI(title="Extraction de factures")
+
+# An archive can hold hundreds of invoices; processed one at a time they would
+# take hours, since each is a separate API round-trip. Requests are sent
+# concurrently instead, kept modest so the API rate limits are not hit.
+MAX_CONCURRENT_EXTRACTIONS = 8
 
 _client: Optional[Anthropic] = None
 
@@ -41,6 +51,26 @@ def health() -> dict:
     return {"status": "ok", "api_key_configured": bool(os.environ.get("ANTHROPIC_API_KEY"))}
 
 
+def _process_all(client: Anthropic, sources: List[InvoiceSource]) -> List[InvoiceResult]:
+    """Extract every invoice concurrently, preserving the input order."""
+    results: List[Optional[InvoiceResult]] = [None] * len(sources)
+    done = 0
+
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_EXTRACTIONS) as pool:
+        pending = {
+            pool.submit(process_source, client, source): index
+            for index, source in enumerate(sources)
+        }
+        for future in as_completed(pending):
+            index = pending[future]
+            results[index] = future.result()
+            done += 1
+            if done % 10 == 0 or done == len(sources):
+                logger.info("Factures traitees : %d/%d", done, len(sources))
+
+    return [r for r in results if r is not None]
+
+
 @app.post("/process")
 async def process(files: List[UploadFile] = File(...)) -> Response:
     if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -49,12 +79,18 @@ async def process(files: List[UploadFile] = File(...)) -> Response:
             content={"error": "ANTHROPIC_API_KEY n'est pas configuree sur le serveur."},
         )
 
-    client = get_client()
-    results = []
+    sources: List[InvoiceSource] = []
     for upload in files:
         content = await upload.read()
-        result = process_upload(client, upload.filename or "sans_nom", content, upload.content_type)
-        results.append(result)
+        sources.extend(expand_upload(upload.filename or "sans_nom", content, upload.content_type))
+
+    logger.info("%d fichier(s) deposes -> %d facture(s) a traiter", len(files), len(sources))
+
+    client = get_client()
+    # Run off the event loop: the extraction is blocking (HTTP + PDF rendering)
+    # and would otherwise freeze the server for the whole batch.
+    loop = asyncio.get_running_loop()
+    results = await loop.run_in_executor(None, _process_all, client, sources)
 
     workbook_bytes = build_workbook(results)
     filename = f"factures_{datetime.now():%Y%m%d_%H%M%S}.xlsx"

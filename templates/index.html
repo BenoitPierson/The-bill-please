@@ -54,13 +54,13 @@
 </head>
 <body>
   <h1>Extraction de factures</h1>
-  <p class="subtitle">Depose tes factures (PDF ou photos) ci-dessous, puis telecharge le recapitulatif Excel.</p>
+  <p class="subtitle">Depose tes factures (PDF, photos ou dossiers .zip) ci-dessous, puis telecharge le recapitulatif Excel.</p>
 
   <div id="dropzone">
     <p><strong>Glisse-depose tes fichiers ici</strong></p>
-    <p class="hint">ou clique pour parcourir — PDF, JPG, PNG</p>
+    <p class="hint">ou clique pour parcourir — PDF, JPG, PNG, ou .zip contenant des factures</p>
   </div>
-  <input type="file" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png,.webp">
+  <input type="file" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.zip">
 
   <ul id="fileList"></ul>
 
@@ -113,7 +113,12 @@ dropzone.addEventListener('drop', (e) => { addFiles(e.dataTransfer.files); });
 processBtn.addEventListener('click', async () => {
   errorEl.textContent = '';
   processBtn.disabled = true;
-  statusEl.textContent = `Traitement de ${files.length} fichier(s) en cours...`;
+  const hasArchive = files.some(f => f.name.toLowerCase().endsWith('.zip'));
+  statusEl.textContent = hasArchive
+    ? `Traitement de ${files.length} fichier(s) en cours — une archive peut contenir des `
+      + `centaines de factures, cela peut prendre plusieurs minutes. Le detail de `
+      + `l'avancement s'affiche dans la fenetre noire du serveur.`
+    : `Traitement de ${files.length} fichier(s) en cours...`;
 
   const formData = new FormData();
   for (const f of files) formData.append('files', f);

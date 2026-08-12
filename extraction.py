@@ -7,7 +7,10 @@ import base64
 import io
 import json
 import os
-from dataclasses import dataclass, field
+import posixpath
+import zipfile
+from dataclasses import dataclass
+from typing import List, Optional
 
 import fitz  # PyMuPDF
 from PIL import Image
@@ -17,6 +20,10 @@ MODEL = "claude-sonnet-5"
 PDF_RENDER_DPI = 150
 MAX_IMAGE_LONG_EDGE = 2000  # caps token cost for large phone photos
 MAX_PAGES_PER_INVOICE = 5
+
+INVOICE_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp"}
+ARCHIVE_EXTENSIONS = {".zip"}
+MAX_ARCHIVE_DEPTH = 3  # allows archives nested inside archives, without looping forever
 
 INVOICE_SCHEMA = {
     "type": "object",
@@ -116,6 +123,7 @@ USER_INSTRUCTION = (
 @dataclass
 class InvoiceResult:
     filename: str
+    archive: str | None = None  # name of the .zip the invoice came from, if any
     supplier_name: str | None = None
     invoice_number: str | None = None
     invoice_date: str | None = None
@@ -125,6 +133,128 @@ class InvoiceResult:
     extraction_notes: str | None = None
     error: str | None = None
     page_count: int = 0
+
+
+@dataclass
+class InvoiceSource:
+    """One invoice to process, with a lazy handle on its bytes.
+
+    An uploaded archive can hold hundreds of invoices, so the bytes are read
+    only when a worker actually picks the invoice up — the whole archive is
+    never decompressed into memory at once. `archive_bytes` is shared (and
+    never mutated) across every source of the same archive.
+    """
+
+    filename: str
+    content_type: Optional[str] = None
+    archive: Optional[str] = None
+    data: Optional[bytes] = None
+    archive_bytes: Optional[bytes] = None
+    member: Optional[str] = None
+    skip_reason: Optional[str] = None
+
+    def read(self) -> bytes:
+        if self.data is not None:
+            return self.data
+        # A fresh ZipFile per call: zipfile handles are not thread-safe, but the
+        # underlying bytes are immutable so wrapping them is cheap and safe.
+        with zipfile.ZipFile(io.BytesIO(self.archive_bytes)) as archive:
+            return archive.read(self.member)
+
+
+def _is_archive(filename: str, content_type: Optional[str]) -> bool:
+    if os.path.splitext(filename)[1].lower() in ARCHIVE_EXTENSIONS:
+        return True
+    return content_type in ("application/zip", "application/x-zip-compressed")
+
+
+def _is_junk_entry(member: str) -> bool:
+    """Filter out archive noise: OS metadata and hidden files."""
+    if member.startswith("__MACOSX/") or "/__MACOSX/" in member:
+        return True
+    basename = posixpath.basename(member)
+    return not basename or basename.startswith(".") or basename == "Thumbs.db"
+
+
+def _expand_archive(
+    archive_name: str, archive_bytes: bytes, depth: int = 1
+) -> List[InvoiceSource]:
+    """List the invoices held in a .zip, recursing into nested archives."""
+    sources: List[InvoiceSource] = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+            members = [m for m in archive.infolist() if not m.is_dir()]
+            nested: List[tuple] = []
+            for member in members:
+                name = member.filename
+                if _is_junk_entry(name):
+                    continue
+
+                extension = os.path.splitext(name)[1].lower()
+                if extension in INVOICE_EXTENSIONS:
+                    sources.append(
+                        InvoiceSource(
+                            filename=name,
+                            archive=archive_name,
+                            archive_bytes=archive_bytes,
+                            member=name,
+                        )
+                    )
+                elif extension in ARCHIVE_EXTENSIONS:
+                    if depth < MAX_ARCHIVE_DEPTH:
+                        nested.append((name, archive.read(name)))
+                    else:
+                        sources.append(
+                            InvoiceSource(
+                                filename=name,
+                                archive=archive_name,
+                                skip_reason="Archive trop imbriquee : non exploree.",
+                            )
+                        )
+                else:
+                    # Reported rather than dropped, so nothing disappears silently.
+                    sources.append(
+                        InvoiceSource(
+                            filename=name,
+                            archive=archive_name,
+                            skip_reason="Format non pris en charge (ni PDF, ni image).",
+                        )
+                    )
+    except zipfile.BadZipFile as exc:
+        return [
+            InvoiceSource(
+                filename=archive_name,
+                skip_reason="Archive illisible ou corrompue : {}".format(exc),
+            )
+        ]
+
+    for nested_name, nested_bytes in nested:
+        label = "{} > {}".format(archive_name, nested_name)
+        sources.extend(_expand_archive(label, nested_bytes, depth + 1))
+
+    if not sources:
+        return [
+            InvoiceSource(
+                filename=archive_name,
+                skip_reason="Aucune facture (PDF ou image) trouvee dans l'archive.",
+            )
+        ]
+
+    sources.sort(key=lambda s: s.filename)
+    return sources
+
+
+def expand_upload(
+    filename: str, content_bytes: bytes, content_type: Optional[str]
+) -> List[InvoiceSource]:
+    """Turn one upload into the list of invoices it contains.
+
+    A PDF or photo yields a single invoice; a .zip yields one per document
+    found inside it.
+    """
+    if _is_archive(filename, content_type):
+        return _expand_archive(filename, content_bytes)
+    return [InvoiceSource(filename=filename, content_type=content_type, data=content_bytes)]
 
 
 def _resize_if_needed(image_bytes: bytes, fmt: str) -> bytes:
@@ -241,3 +371,24 @@ def process_upload(client: Anthropic, filename: str, content_bytes: bytes, conte
         return extract_invoice(client, filename, pages)
     except Exception as exc:  # noqa: BLE001 - keep batch processing resilient
         return InvoiceResult(filename=filename, error=f"Erreur API : {exc}", page_count=len(pages))
+
+
+def process_source(client: Anthropic, source: InvoiceSource) -> InvoiceResult:
+    """Process one invoice, from a direct upload or from inside an archive."""
+    if source.skip_reason is not None:
+        return InvoiceResult(
+            filename=source.filename, archive=source.archive, error=source.skip_reason
+        )
+
+    try:
+        content_bytes = source.read()
+    except Exception as exc:  # noqa: BLE001 - a corrupt entry must not abort the batch
+        return InvoiceResult(
+            filename=source.filename,
+            archive=source.archive,
+            error=f"Lecture impossible depuis l'archive : {exc}",
+        )
+
+    result = process_upload(client, source.filename, content_bytes, source.content_type)
+    result.archive = source.archive
+    return result
