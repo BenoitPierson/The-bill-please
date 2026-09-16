@@ -386,7 +386,17 @@ def extract_invoice(
         model=MODEL,
         max_tokens=2048,
         thinking={"type": "disabled"},
-        system=build_system_prompt(rules),
+        # The system prompt is byte-identical for every invoice of a batch (the
+        # learned rules are loaded once), while the images differ — the textbook
+        # shared-prefix case for caching. Without it, a tenant with many learned
+        # rules pays for the whole rule set on every single invoice.
+        system=[
+            {
+                "type": "text",
+                "text": build_system_prompt(rules),
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
         messages=[{"role": "user", "content": _build_content_blocks(pages)}],
         # The installed SDK (0.72.0) predates typed `output_config` support;
         # extra_body passes it through to the API as raw JSON regardless.

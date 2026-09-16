@@ -99,10 +99,24 @@ each run rather than appended, so the prompt stays small however long the tool i
 
 `rules_for_prompt()` injects **all** of a tenant's rules into every extraction, because the
 supplier is only known *after* extraction — there is no way to select the right rule
-beforehand. Rules are one or two sentences and sit in the cached prompt prefix, so the cost is
-negligible; `MAX_RULES_IN_PROMPT` caps it. If that ever becomes too large, the alternative is
-to use the archive folder name as a supplier hint for rule lookup (the reference dataset
-stores invoices under `<month>/<supplier>/`).
+beforehand. They go in the `system` prompt (instructions), not in the user message that
+carries the images.
+
+The cost of that is real and worth knowing before raising `MAX_RULES_IN_PROMPT` (60):
+measured with `count_tokens`, the base system prompt is ~1270 tokens, ~1850 with 5 rules,
+~6900 with 60 — against ~2900 tokens for the invoice image itself. At the cap, the rules
+would more than double the per-invoice input.
+
+This is why the system block carries `cache_control` in `extract_invoice`: it is
+byte-identical across every invoice of a batch (rules are loaded once in `_run_batch`), while
+the images differ — the shared-prefix case. Verified on real calls: ~2500 tokens written to
+cache on the first request, then re-read at ~0.1x on every subsequent one, worth roughly $7
+on a 1180-invoice batch. The first few concurrent workers necessarily miss the cache (nothing
+is written yet), which is negligible at batch scale.
+
+If the rule set still outgrows this, the alternative is to stop sending all of them: the
+archive folder name is a usable supplier hint *before* extraction (the reference dataset
+stores invoices under `<month>/<supplier>/`), so rules could be selected per invoice.
 
 Learning is triggered automatically once `AUTO_LEARN_THRESHOLD` corrections are pending, and
 manually from the Invoices panel. Corrections are marked `learned` either way — including
