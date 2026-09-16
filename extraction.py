@@ -9,7 +9,7 @@ import json
 import os
 import posixpath
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 import fitz  # PyMuPDF
@@ -24,6 +24,16 @@ MAX_PAGES_PER_INVOICE = 5
 INVOICE_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp"}
 ARCHIVE_EXTENSIONS = {".zip"}
 MAX_ARCHIVE_DEPTH = 3  # allows archives nested inside archives, without looping forever
+
+# The fields the model fills in, in the order they are shown to the user.
+EXTRACTED_FIELDS = (
+    "supplier_name",
+    "invoice_number",
+    "invoice_date",
+    "total_amount",
+    "currency",
+    "vat_amount",
+)
 
 INVOICE_SCHEMA = {
     "type": "object",
@@ -58,7 +68,13 @@ INVOICE_SCHEMA = {
         },
         "currency": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
-            "description": "Currency code or symbol found on the invoice (e.g. EUR, USD, €, $).",
+            "description": (
+                "Currency as an ISO 4217 three-letter code (EUR, USD, KES, GBP...), "
+                "normalized from however it is written on the invoice — 'Ksh', 'KShs', "
+                "'SHS' and 'K.Sh' are all KES; '€' is EUR; '$' is USD unless the "
+                "document points to another dollar. Null if no currency can be "
+                "determined at all."
+            ),
         },
         "vat_amount": {
             "anyOf": [{"type": "number"}, {"type": "null"}],
@@ -67,6 +83,17 @@ INVOICE_SCHEMA = {
         "extraction_notes": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": "Short note about anything illegible, ambiguous, or uncertain. Null if nothing to flag.",
+        },
+        "uncertain_fields": {
+            "type": "array",
+            "items": {"type": "string", "enum": list(EXTRACTED_FIELDS)},
+            "description": (
+                "Names of the fields above whose value you are NOT confident about — "
+                "illegible, ambiguous, guessed from context, or possibly mislabelled on "
+                "the document. Empty array when every value is certain. These fields are "
+                "highlighted for human review, so list a field whenever a human should "
+                "double-check it."
+            ),
         },
     },
     "required": [
@@ -77,6 +104,7 @@ INVOICE_SCHEMA = {
         "currency",
         "vat_amount",
         "extraction_notes",
+        "uncertain_fields",
     ],
     "additionalProperties": False,
 }
@@ -104,6 +132,10 @@ etc.) : ne renvoie jamais la date telle qu'ecrite sur la facture. Si l'ordre jou
 reellement ambigu, deduis-le du contexte (langue/pays de la facture, autres dates presentes \
 sur le document) et signale ton incertitude dans extraction_notes plutot que de laisser le \
 format d'origine.
+- La devise doit TOUJOURS etre renvoyee sous forme de code ISO 4217 a trois lettres \
+(EUR, USD, KES, GBP...), quelle que soit son ecriture sur la facture : "Ksh", "KShs", \
+"SHS", "K.Sh" donnent tous KES ; "€" donne EUR ; "$" donne USD sauf indication contraire. \
+Sans cette normalisation, les totaux par devise deviennent inexploitables.
 - Sur une facture multi-pages, le total et la TVA se trouvent generalement dans le \
 recapitulatif final : verifie toutes les pages avant de conclure.
 - Si un champ est illisible, absent, ou incertain, mets null et explique brievement pourquoi \
@@ -113,11 +145,30 @@ dans extraction_notes (mets null dans extraction_notes s'il n'y a rien a signale
 avec le RECEIPT NUMBER (numero de recu/reçu) : ce sont deux identifiants differents qui \
 peuvent tous les deux apparaitre sur le meme document. Le champ invoice_number doit \
 toujours contenir le numero de facture (INVOICE NUMBER / CV INVOICE NUMBER), jamais le \
-RECEIPT NUMBER, meme si le RECEIPT NUMBER est plus visible ou plus proche du haut de page."""
+RECEIPT NUMBER, meme si le RECEIPT NUMBER est plus visible ou plus proche du haut de page.
+- Remplis uncertain_fields avec le nom de chaque champ dont tu n'es pas sur : valeur illisible, \
+deduite du contexte, ambigue, ou dont l'etiquette sur le document prete a confusion. Ces champs \
+seront surlignes pour relecture humaine : mieux vaut signaler un doute leger que laisser passer \
+une erreur silencieuse. Laisse le tableau vide si tout est certain."""
+
+RULES_HEADER = """
+
+REGLES APPRISES DES CORRECTIONS DE L'UTILISATEUR
+Ces regles viennent de corrections deja apportees a la main sur des factures precedentes.
+Elles decrivent ce que l'utilisateur attend reellement : applique-les en priorite sur les \
+consignes generales ci-dessus quand elles concernent la facture en cours."""
 
 USER_INSTRUCTION = (
     "Voici les pages d'une facture. Extrait les informations demandees au format JSON."
 )
+
+
+def build_system_prompt(rules: Optional[List[str]] = None) -> str:
+    """System prompt, extended with the rules learned from user corrections."""
+    if not rules:
+        return SYSTEM_PROMPT
+    lines = "\n".join("- {}".format(rule) for rule in rules)
+    return "{}{}\n{}".format(SYSTEM_PROMPT, RULES_HEADER, lines)
 
 
 @dataclass
@@ -131,6 +182,7 @@ class InvoiceResult:
     currency: str | None = None
     vat_amount: float | None = None
     extraction_notes: str | None = None
+    uncertain_fields: List[str] = field(default_factory=list)
     error: str | None = None
     page_count: int = 0
 
@@ -321,7 +373,12 @@ def _build_content_blocks(pages: list[tuple[bytes, str]]) -> list[dict]:
     return blocks
 
 
-def extract_invoice(client: Anthropic, filename: str, pages: list[tuple[bytes, str]]) -> InvoiceResult:
+def extract_invoice(
+    client: Anthropic,
+    filename: str,
+    pages: list[tuple[bytes, str]],
+    rules: Optional[List[str]] = None,
+) -> InvoiceResult:
     if not pages:
         return InvoiceResult(filename=filename, error="Aucune page/image exploitable dans ce fichier.")
 
@@ -329,7 +386,7 @@ def extract_invoice(client: Anthropic, filename: str, pages: list[tuple[bytes, s
         model=MODEL,
         max_tokens=2048,
         thinking={"type": "disabled"},
-        system=SYSTEM_PROMPT,
+        system=build_system_prompt(rules),
         messages=[{"role": "user", "content": _build_content_blocks(pages)}],
         # The installed SDK (0.72.0) predates typed `output_config` support;
         # extra_body passes it through to the API as raw JSON regardless.
@@ -348,6 +405,7 @@ def extract_invoice(client: Anthropic, filename: str, pages: list[tuple[bytes, s
     except json.JSONDecodeError as exc:
         return InvoiceResult(filename=filename, error=f"JSON invalide: {exc}", page_count=len(pages))
 
+    uncertain = data.get("uncertain_fields") or []
     return InvoiceResult(
         filename=filename,
         supplier_name=data.get("supplier_name"),
@@ -357,38 +415,24 @@ def extract_invoice(client: Anthropic, filename: str, pages: list[tuple[bytes, s
         currency=data.get("currency"),
         vat_amount=data.get("vat_amount"),
         extraction_notes=data.get("extraction_notes"),
+        uncertain_fields=[f for f in uncertain if f in EXTRACTED_FIELDS],
         page_count=len(pages),
     )
 
 
-def process_upload(client: Anthropic, filename: str, content_bytes: bytes, content_type: str | None) -> InvoiceResult:
+def process_upload(
+    client: Anthropic,
+    filename: str,
+    content_bytes: bytes,
+    content_type: str | None,
+    rules: Optional[List[str]] = None,
+) -> InvoiceResult:
     try:
         pages = file_to_page_images(filename, content_bytes, content_type)
     except Exception as exc:  # noqa: BLE001 - surface any parsing failure per-file
         return InvoiceResult(filename=filename, error=f"Impossible de lire le fichier : {exc}")
 
     try:
-        return extract_invoice(client, filename, pages)
+        return extract_invoice(client, filename, pages, rules=rules)
     except Exception as exc:  # noqa: BLE001 - keep batch processing resilient
         return InvoiceResult(filename=filename, error=f"Erreur API : {exc}", page_count=len(pages))
-
-
-def process_source(client: Anthropic, source: InvoiceSource) -> InvoiceResult:
-    """Process one invoice, from a direct upload or from inside an archive."""
-    if source.skip_reason is not None:
-        return InvoiceResult(
-            filename=source.filename, archive=source.archive, error=source.skip_reason
-        )
-
-    try:
-        content_bytes = source.read()
-    except Exception as exc:  # noqa: BLE001 - a corrupt entry must not abort the batch
-        return InvoiceResult(
-            filename=source.filename,
-            archive=source.archive,
-            error=f"Lecture impossible depuis l'archive : {exc}",
-        )
-
-    result = process_upload(client, source.filename, content_bytes, source.content_type)
-    result.archive = source.archive
-    return result

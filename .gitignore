@@ -8,3 +8,7 @@ venv/
 
 # Vraies factures deposees localement pour les tests — ne jamais versionner
 Factures*/
+
+# Donnees des clients : bases SQLite, factures originales, cle de session.
+# Tout l'etat mutable de la plateforme vit ici et ne doit jamais etre versionne.
+data/

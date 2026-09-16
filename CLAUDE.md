@@ -4,126 +4,176 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A local web tool that extracts structured data from invoices (PDF or photos, printed or
-handwritten, French or English) using Claude's vision API, and outputs an Excel file with one
-row per invoice: supplier name, invoice number, date, total amount, VAT amount. Invoices can
-be dropped individually or as `.zip` archives holding hundreds of them.
+A multi-tenant web platform that extracts structured data from invoices (PDF or photos,
+printed or handwritten, French or English) using Claude's vision API. Two working tabs:
+**Dashboard** (aggregates) and **Invoices** (a reviewable, editable, exportable table).
+Invoices are imported individually or as `.zip` archives holding hundreds of them.
 
 ## Commands
 
 ```
-.venv\Scripts\activate
-python app.py
+Lancer.bat                       # start locally (also opens the browser)
+.venv\Scripts\python.exe app.py  # same, without the browser
+
+python manage.py tenants                            # list client workspaces
+python manage.py add-tenant acme --name "ACME SARL" # provision a client
+python manage.py add-user acme compta@acme.fr       # create an account
 ```
 
-Runs the FastAPI app with `uvicorn` (auto-reload on file changes) at http://127.0.0.1:8000.
-Double-clicking `Lancer.bat` (or the desktop shortcut) does the same and opens the browser
-automatically.
+There is no test suite in the repo, no linter, no build step. The front end is
+server-rendered Jinja + one CSS file + one JS file, deliberately without a bundler.
 
-There is no test suite, linter, or build step configured.
+**Running Python outside `Lancer.bat` needs Anaconda's DLL directories on PATH**, or
+`import sqlite3` / `import ssl` fail with "DLL load failed" (see Python 3.8 note below):
 
-To reinstall dependencies from scratch:
-
+```powershell
+$conda = "$env:USERPROFILE\anaconda3"
+$env:PATH = "$conda;$conda\Library\bin;$conda\Scripts;$env:PATH"
 ```
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-The venv was built against Anaconda Python 3.8.8 — see the "Python 3.8 compatibility"
-note below before adding new type hints.
 
 ## Architecture
 
-Three modules, no framework beyond FastAPI:
+Request flow: browser → tenant resolved from the `Host` header → session checked against
+that tenant → per-tenant SQLite database and file directory.
 
-- **`extraction.py`** — archive expansion + all Claude API logic. `expand_upload` turns one
-  upload into a list of `InvoiceSource` (a `.pdf`/image yields one; a `.zip` yields one per
-  document inside, recursing into nested archives up to `MAX_ARCHIVE_DEPTH`). An
-  `InvoiceSource` holds its bytes *lazily* — archive members are read only when a worker
-  picks them up, so a 300 MB archive is never fully decompressed in memory; the shared
-  `archive_bytes` is immutable, and each read wraps it in a fresh `ZipFile` because zipfile
-  handles are not thread-safe. Then `file_to_page_images` converts a document into page
-  images (PDFs rasterized page-by-page with PyMuPDF at `PDF_RENDER_DPI`; photos passed
-  through, downscaled above `MAX_IMAGE_LONG_EDGE`), and `extract_invoice` sends them in a
-  single Messages API request with a JSON-schema structured output (`INVOICE_SCHEMA`). One
-  call to `extract_invoice` = one invoice, all its pages sent together (so multi-page
-  totals/VAT recap tables are seen in context). Errors (unreadable file, API failure,
-  refusal, bad JSON, unsupported archive member) are caught per-file and stored on
-  `InvoiceResult.error` rather than raised, so one bad invoice never aborts a batch.
-- **`excel_export.py`** — turns a `list[InvoiceResult]` into an `.xlsx` byte string
-  (`openpyxl`, in-memory `BytesIO`, no disk writes).
-- **`app.py`** — FastAPI app with two routes: `GET /` serves `templates/index.html`
-  (a single-page drag & drop UI, no JS framework, no build step) and `POST /process` accepts
-  multipart file uploads, expands them into invoice sources, extracts them concurrently
-  (`_process_all`), and streams back the generated Excel file as the HTTP response.
+| Module | Responsibility |
+|---|---|
+| `config.py` | Settings from the environment; generates/persists a local session secret |
+| `tenants.py` | Tenant registry (the filesystem *is* the registry) and Host → tenant resolution |
+| `db.py` | Per-tenant schema, connections, queries, dashboard aggregates |
+| `auth.py` | scrypt password hashing (stdlib — no native dep to build on Windows) |
+| `extraction.py` | Archive expansion + the Claude call that turns a document into fields |
+| `pipeline.py` | Background import: expand → store original → extract concurrently → persist |
+| `learning.py` | User corrections → generalised extraction rules |
+| `charts.py` | Dashboard chart geometry (scales, ticks, bar rectangles) |
+| `excel_export.py` | Excel export of the filtered table, with the review colour code |
+| `app.py` | FastAPI routes, templates, session middleware |
 
-Request flow: browser drag&drop → `POST /process` (multipart) → `expand_upload` per upload
-(archives fan out into many sources) → `_process_all` runs `process_source` across a
-`ThreadPoolExecutor` → per source `file_to_page_images` → `extract_invoice` (one Claude API
-call per invoice) → results reordered to match input → `build_workbook` → `.xlsx` streamed
-back → browser triggers download.
+### Multi-tenancy: isolation by construction
 
-### Concurrency
+Each client gets `DATA_DIR/tenants/<slug>/` containing `data.db` and `files/`. There is **no
+shared table and no `tenant_id` column** — a query can only see the database it was opened
+on, so cross-tenant leakage is not a bug you can write. It also makes per-client backup,
+export and GDPR deletion a directory operation.
 
-A single archive can hold hundreds of invoices (the reference dataset has ~1180 across 7
-archives), and each invoice is a separate API round-trip of a few seconds — sequential
-processing would take hours. `_process_all` fans the work out over a `ThreadPoolExecutor`
-capped at `MAX_CONCURRENT_EXTRACTIONS` (8), which the SDK's retry logic keeps within API
-rate limits. Two constraints shape this design:
+The trade-off is that schema changes must run against every tenant database; `db.connect()`
+executes the idempotent `SCHEMA` script on every open, which handles it as long as
+migrations stay additive (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN`).
 
-- The whole batch runs via `loop.run_in_executor` so the blocking work (HTTP + PDF
-  rendering) never freezes the event loop.
-- Results are written back into a pre-sized list by index, so Excel row order matches
-  upload order regardless of completion order.
+Tenant resolution (`tenants.resolve_from_host`) needs `APP_DOMAIN` in production: without it,
+nothing distinguishes `acme.factures.example.com` (tenant "acme") from the bare application
+domain `factures.example.com`. Locally, any non-localhost host falls back to `DEFAULT_TENANT`.
+Only `DEFAULT_TENANT` is auto-created; an unknown subdomain must 404 rather than silently
+provision an empty workspace.
 
-Progress is logged to the server console (`logger.info`, every 10 invoices) — the HTTP
-response only arrives when the entire batch is done, so that log is the only live feedback.
-A long batch therefore means a single long-running request; if this becomes a problem
-(browser/proxy timeouts, no resumability), the next step is a job queue with a polling
-endpoint rather than a bigger thread pool.
+Sessions are signed cookies carrying `{tenant, email}`. `current_user()` refuses a session
+whose tenant does not match the host, so a cookie cannot be replayed against another client.
 
-### Claude API integration details
+### Import pipeline & concurrency
 
-- Model is pinned in `extraction.py::MODEL` (`claude-sonnet-5`).
-- Thinking is explicitly disabled (`thinking={"type": "disabled"}`) — this is a
-  single-shot extraction task, not a reasoning task, and keeps `max_tokens` budget
-  predictable.
-- **Structured output goes through `extra_body`, not the typed `output_config` kwarg.**
-  The pinned `anthropic` SDK version (0.72.0, latest on PyPI as of this writing) does not
-  expose `output_config` as a named parameter on `messages.create()` yet. Passing
-  `extra_body={"output_config": {...}}` forwards it as raw JSON in the request body, which
-  the API accepts. If the SDK is upgraded and gains native `output_config` support, this can
-  be simplified back to a normal kwarg — check `inspect.signature(Messages.create)` first.
-- The invoice/page images are base64-encoded inline in the request (no Files API).
+A batch can hold ~1180 invoices (the reference dataset), each a separate API round-trip of a
+few seconds. `pipeline.start_import` therefore returns immediately with a `batch_id` and runs
+the work in a background thread; the browser polls `/api/batches/{id}`. Inside, a
+`ThreadPoolExecutor` capped at `MAX_CONCURRENT_EXTRACTIONS` (8) keeps within API rate limits,
+and `_running_imports` prevents a second concurrent batch per tenant (which would multiply
+effective concurrency).
+
+`InvoiceSource` holds archive bytes lazily: members are read only when a worker picks them
+up, so a 300 MB archive is never fully decompressed in memory. The shared `archive_bytes` is
+immutable and each read wraps it in a fresh `ZipFile`, because zipfile handles are not
+thread-safe.
+
+Originals are written to `tenants/<slug>/files/<invoice_id><ext>` and served by
+`/invoices/{id}/file`, which re-resolves the path inside the tenant directory and verifies
+containment before serving — never a static mount, since these are client documents behind
+authentication.
+
+### The correction → rule loop
+
+This is the part worth understanding before changing it. A raw correction
+(`invoice_number: 0190485190000003873 → BC-2026-0211`) is a *value*, and values don't
+generalise. `learning.py` therefore sends the pending corrections for a supplier to Claude
+and asks for the **rule** behind them ("don't use the long number near the barcode; take the
+alphanumeric reference"). Rules are stored one per supplier (plus one global), *refined* on
+each run rather than appended, so the prompt stays small however long the tool is used.
+
+`rules_for_prompt()` injects **all** of a tenant's rules into every extraction, because the
+supplier is only known *after* extraction — there is no way to select the right rule
+beforehand. Rules are one or two sentences and sit in the cached prompt prefix, so the cost is
+negligible; `MAX_RULES_IN_PROMPT` caps it. If that ever becomes too large, the alternative is
+to use the archive folder name as a supplier hint for rule lookup (the reference dataset
+stores invoices under `<month>/<supplier>/`).
+
+Learning is triggered automatically once `AUTO_LEARN_THRESHOLD` corrections are pending, and
+manually from the Invoices panel. Corrections are marked `learned` either way — including
+those too vague to yield a rule — so they are not re-analysed on every run.
+
+### Claude API integration
+
+- Model pinned in `extraction.py::MODEL` (`claude-sonnet-5`); rule distillation uses
+  `learning.py::RULE_MODEL`.
+- Thinking is explicitly disabled — single-shot extraction, not a reasoning task, and it
+  keeps the `max_tokens` budget predictable.
+- **Structured output goes through `extra_body`, not the typed `output_config` kwarg.** The
+  pinned `anthropic` SDK (0.72.0) does not expose `output_config` on `messages.create()`;
+  `extra_body` forwards it as raw JSON, which the API accepts. If the SDK gains native
+  support, simplify it back — check `inspect.signature(Messages.create)` first.
+- `uncertain_fields` in `INVOICE_SCHEMA` is what drives the orange highlighting. It is a
+  structured array of field names rather than prose, precisely so the UI can act on it;
+  `extraction_notes` carries the human-readable explanation alongside.
+- Client is built with `max_retries=6`: the default of 2 was not enough to ride out 529
+  "overloaded" spikes, which silently left invoices unprocessed.
+
+### Charts
+
+`charts.py` computes geometry; the template only draws. House data-viz rules are applied:
+bars capped at 24px with a 4px rounded data-end squared at the baseline (the `bar-foot` rect),
+hairline gridlines, axis bounds rounded to readable values (`nice_ceiling`), and labels used
+selectively — the monthly chart labels only its peak, the supplier ranking labels every tip
+and drops the axis entirely. Both charts are single-series, so no legend.
+
+The UI commits to a single light theme on purpose (`color-scheme: light`); there is no dark
+variant to keep in sync.
+
+**Amounts are summed as stored, across currencies.** `dashboard_stats` returns a currency
+breakdown and the template warns when more than one is present — do not add a total that
+silently mixes currencies. The extraction prompt normalises currencies to ISO 4217 codes
+specifically so this stays rare.
+
+### CSS trap
+
+A `display` rule in a component class silently beats the browser default for `[hidden]`, so
+JS-toggled panels stay visible. `app.css` has a global `[hidden] { display: none !important }`
+for this — keep it.
 
 ### Python 3.8 compatibility
 
-The venv runs Anaconda Python 3.8.8. `from __future__ import annotations` is used everywhere
-so `X | None` and bare `list[...]`/`tuple[...]` generics are safe *as long as nothing
-evaluates them at runtime*. FastAPI/Pydantic **does** evaluate route handler signatures at
-import time (to build request/response models), so PEP 585/604 syntax (`list[X]`, `X | None`)
-in `app.py` route function signatures will raise `TypeError: 'type' object is not
-subscriptable` on 3.8 — use `typing.List[X]` / `typing.Optional[X]` there instead. Plain
-dataclasses and non-route functions (e.g. everything in `extraction.py`) are unaffected since
-their annotations are never evaluated.
+The venv runs Anaconda Python 3.8.8. `from __future__ import annotations` is used everywhere,
+so `X | None` and bare `list[...]` generics are safe *as long as nothing evaluates them at
+runtime*. FastAPI/Pydantic **does** evaluate route handler signatures at import time, so PEP
+585/604 syntax in `app.py` route signatures raises `TypeError: 'type' object is not
+subscriptable` — use `typing.List[X]` / `typing.Optional[X]` there. Plain dataclasses and
+non-route functions are unaffected.
+
+`Lancer.bat` prepends Anaconda's DLL directories to `PATH`; without them `_ssl` and `_sqlite3`
+fail to load when launched from Explorer. It also frees port 8000 from a stale instance
+(error 10048) and waits for the server to answer before opening the browser
+(`open_browser.bat`, using `curl` rather than PowerShell to avoid execution-policy issues).
+Uvicorn auto-reload stays **off**: it watches `.venv` and hangs startup on Windows.
 
 ## Key assumptions baked into the code
 
-- One document = one invoice (a multi-page PDF is one invoice's pages, not several invoices
-  in one file). Real data does violate this occasionally — the model flags it in
-  `extraction_notes` rather than splitting, and only the first invoice's data is returned.
-- The supplier is the invoice's issuer, not the client/recipient — this distinction is
-  spelled out in `SYSTEM_PROMPT` because it's the most common extraction mistake. The
-  supplier folder name inside an archive is *not* used as a hint; extraction relies on the
-  document alone.
-- `invoice_number` must come from an INVOICE NUMBER / CV INVOICE NUMBER field, never from a
-  RECEIPT NUMBER — both appear on the reference dataset's invoices.
-- Amounts are normalized to plain numbers with `.` as decimal separator (European
-  `1 234,56` → `1234.56`) and dates *always* to `YYYY-MM-DD` (ambiguous day/month order is
-  resolved from context and flagged in `extraction_notes`, never left in the source format)
-  — both are instructed in `SYSTEM_PROMPT`, not post-processed in Python.
-- `MAX_PAGES_PER_INVOICE` (5) caps how many PDF pages are sent per invoice, to bound cost.
-- Archive members that are neither documents nor known OS junk (`__MACOSX/`, dotfiles,
-  `Thumbs.db`) are reported as error rows rather than silently dropped, so nothing vanishes
-  from the report without explanation.
+- One document = one invoice. Real data violates this occasionally — the model flags it in
+  `extraction_notes` and returns the first invoice rather than splitting.
+- The supplier is the invoice's issuer, not the client. The supplier folder name inside an
+  archive is *not* used as a hint; extraction relies on the document alone.
+- `invoice_number` comes from an INVOICE NUMBER / CV INVOICE NUMBER field, never a RECEIPT
+  NUMBER, and never the long KRA/control number printed near the barcode on the reference
+  dataset's Kenyan invoices.
+- Dates always `YYYY-MM-DD`, currencies always ISO 4217, amounts always plain numbers — all
+  instructed in `SYSTEM_PROMPT`, not post-processed in Python.
+- `EDITABLE_FIELDS` in `db.py` is the authority on what a user may change; provenance
+  (filename, archive, ids) is never editable, and `update_invoice_field` refuses anything
+  outside it.
+- Archive members that are neither documents nor known OS junk are reported as error rows
+  rather than silently dropped.

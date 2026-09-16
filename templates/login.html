@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Connexion — {{ tenant_name }}</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="centered">
+<form class="card auth-card" method="post" action="/login">
+  <h1 class="auth-title">{{ tenant_name }}</h1>
+  <p class="auth-subtitle">Extraction et suivi des factures fournisseurs</p>
+
+  {% if error %}<p class="alert alert-error">{{ error }}</p>{% endif %}
+
+  <label class="field">
+    <span>Adresse e-mail</span>
+    <input type="email" name="email" autocomplete="username" required autofocus>
+  </label>
+
+  <label class="field">
+    <span>Mot de passe</span>
+    <input type="password" name="password" autocomplete="current-password" required>
+  </label>
+
+  <button type="submit" class="btn btn-primary btn-block">Se connecter</button>
+</form>
+</body>
+</html>

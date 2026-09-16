@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Dashboard</h1>
+    <p class="page-sub">
+      {% if filters.supplier or filters.date_from or filters.date_to %}
+        Vue filtree — <a href="/dashboard">voir tout</a>
+      {% else %}
+        Vue d'ensemble des factures fournisseurs
+      {% endif %}
+    </p>
+  </div>
+</div>
+
+<!-- Period / supplier filter ------------------------------------------------>
+<form class="card filters" method="get" action="/dashboard">
+  <label class="field">
+    <span>Fournisseur</span>
+    <select name="supplier">
+      <option value="">Tous</option>
+      {% for supplier in suppliers %}
+      <option value="{{ supplier }}" {% if filters.supplier == supplier %}selected{% endif %}>{{ supplier }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>Du</span>
+    <input type="date" name="date_from" value="{{ filters.date_from }}">
+  </label>
+  <label class="field">
+    <span>Au</span>
+    <input type="date" name="date_to" value="{{ filters.date_to }}">
+  </label>
+  <div class="filter-actions">
+    <button type="submit" class="btn btn-primary">Appliquer</button>
+    <a href="/dashboard" class="btn btn-ghost">Reinitialiser</a>
+  </div>
+</form>
+
+{% set totals = stats.totals %}
+{% set currency = currency_label %}
+
+<!-- KPIs -------------------------------------------------------------------->
+<section class="kpi-row">
+  <div class="card kpi kpi-hero">
+    <span class="kpi-label">Total facture</span>
+    <span class="kpi-hero-value">{{ totals.total_amount | amount }}</span>
+    <span class="kpi-unit">{{ currency }}</span>
+  </div>
+  <div class="card kpi">
+    <span class="kpi-label">Factures</span>
+    <span class="kpi-value">{{ totals.invoice_count }}</span>
+  </div>
+  <div class="card kpi">
+    <span class="kpi-label">TVA cumulee</span>
+    <span class="kpi-value">{{ totals.vat_amount | compact }}</span>
+    <span class="kpi-unit">{{ currency }}</span>
+  </div>
+  <div class="card kpi">
+    <span class="kpi-label">Fournisseurs</span>
+    <span class="kpi-value">{{ totals.supplier_count }}</span>
+  </div>
+  <div class="card kpi">
+    <span class="kpi-label">A verifier</span>
+    <span class="kpi-value">{{ totals.uncertain_count or 0 }}</span>
+    <a class="kpi-link" href="/invoices?status=uncertain">Voir</a>
+  </div>
+  <div class="card kpi">
+    <span class="kpi-label">En erreur</span>
+    <span class="kpi-value">{{ totals.error_count or 0 }}</span>
+    <a class="kpi-link" href="/invoices?status=errors">Voir</a>
+  </div>
+</section>
+
+{% if stats.currencies | length > 1 %}
+<p class="alert alert-warn">
+  Plusieurs devises sont presentes ({% for c in stats.currencies %}{{ c.currency }} ({{ c.n }}){% if not loop.last %}, {% endif %}{% endfor %}).
+  Les totaux ci-dessus additionnent des montants de devises differentes : filtre par
+  fournisseur pour obtenir un total homogene.
+</p>
+{% endif %}
+
+<!-- Monthly amounts --------------------------------------------------------->
+<section class="card chart-card">
+  <header class="chart-head">
+    <h2>Montant facture par mois</h2>
+    <span class="chart-sub">Somme des montants, en {{ currency }}</span>
+  </header>
+
+  {% if monthly.empty %}
+  <p class="empty">Aucune facture datee sur la periode.</p>
+  {% else %}
+  <svg class="chart" viewBox="0 0 {{ monthly.width }} {{ monthly.height }}" role="img"
+       aria-label="Montant facture par mois">
+    {% for line in monthly.gridlines %}
+    <line class="grid" x1="{{ monthly.left }}" y1="{{ line.y }}" x2="{{ monthly.right }}" y2="{{ line.y }}"/>
+    <text class="axis-text" x="{{ monthly.left - 10 }}" y="{{ line.y + 4 }}" text-anchor="end">{{ line.label }}</text>
+    {% endfor %}
+
+    {% for bar in monthly.bars %}
+    <g class="bar-group" data-label="{{ bar.label }}"
+       data-value="{{ bar.amount_text }} {{ currency }} · {{ bar.count }} facture{{ 's' if bar.count > 1 else '' }}">
+      <rect class="hit" x="{{ bar.center - 16 }}" y="18" width="32" height="{{ monthly.baseline - 18 }}"/>
+      <rect class="bar" x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}"
+            rx="{{ bar.radius }}"/>
+      <rect class="bar-foot" x="{{ bar.x }}" y="{{ monthly.baseline - bar.radius }}"
+            width="{{ bar.width }}" height="{{ bar.radius }}"/>
+      {% if bar.show_value %}
+      <text class="value-text" x="{{ bar.center }}" y="{{ bar.y - 8 }}" text-anchor="middle">{{ bar.value_text }}</text>
+      {% endif %}
+      {% if bar.show_label %}
+      <text class="axis-text" x="{{ bar.center }}" y="{{ monthly.baseline + 18 }}" text-anchor="middle">{{ bar.label }}</text>
+      {% endif %}
+    </g>
+    {% endfor %}
+
+    <line class="baseline" x1="{{ monthly.left }}" y1="{{ monthly.baseline }}"
+          x2="{{ monthly.right }}" y2="{{ monthly.baseline }}"/>
+  </svg>
+  {% endif %}
+</section>
+
+<!-- Top suppliers ----------------------------------------------------------->
+<section class="card chart-card">
+  <header class="chart-head">
+    <h2>Principaux fournisseurs</h2>
+    <span class="chart-sub">Top {{ suppliers_chart.bars | length }} par montant cumule, en {{ currency }}</span>
+  </header>
+
+  {% if suppliers_chart.empty %}
+  <p class="empty">Aucun fournisseur identifie sur la periode.</p>
+  {% else %}
+  <svg class="chart" viewBox="0 0 {{ suppliers_chart.width }} {{ suppliers_chart.height }}" role="img"
+       aria-label="Principaux fournisseurs par montant">
+    {% for bar in suppliers_chart.bars %}
+    <g class="bar-group" data-label="{{ bar.name }}"
+       data-value="{{ bar.amount_text }} {{ currency }} · {{ bar.count }} facture{{ 's' if bar.count > 1 else '' }}">
+      <rect class="hit" x="0" y="{{ bar.y - 6 }}" width="{{ suppliers_chart.width }}" height="{{ bar.height + 12 }}"/>
+      <text class="row-label" x="{{ suppliers_chart.label_width }}" y="{{ bar.text_y }}" text-anchor="end">{{ bar.name_short }}</text>
+      <rect class="bar" x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}"
+            rx="{{ bar.radius }}"/>
+      <rect class="bar-foot" x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.radius }}" height="{{ bar.height }}"/>
+      <text class="value-text" x="{{ bar.value_x }}" y="{{ bar.text_y }}">{{ bar.value_text }}</text>
+    </g>
+    {% endfor %}
+  </svg>
+  {% endif %}
+</section>
+
+<div class="chart-tooltip" id="chartTooltip" hidden></div>
+{% endblock %}
