@@ -15,9 +15,11 @@ Invoices are imported individually or as `.zip` archives holding hundreds of the
 Lancer.bat                       # start locally (also opens the browser)
 .venv\Scripts\python.exe app.py  # same, without the browser
 
-python manage.py tenants                            # list client workspaces
+python manage.py tenants                            # list client workspaces (+ storage, quota)
 python manage.py add-tenant acme --name "ACME SARL" # provision a client
 python manage.py add-user acme compta@acme.fr       # create an account
+python manage.py storage acme                       # storage breakdown for one client
+python manage.py set-quota acme 5000                # storage cap in MB, 0 = unlimited
 ```
 
 There is no test suite in the repo, no linter, no build step. The front end is
@@ -56,9 +58,14 @@ shared table and no `tenant_id` column** — a query can only see the database i
 on, so cross-tenant leakage is not a bug you can write. It also makes per-client backup,
 export and GDPR deletion a directory operation.
 
-The trade-off is that schema changes must run against every tenant database; `db.connect()`
-executes the idempotent `SCHEMA` script on every open, which handles it as long as
-migrations stay additive (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN`).
+The trade-off is that schema changes must run against every tenant database. `db.connect()`
+runs `SCHEMA` plus `_migrate()` once per database per process (guarded by `_initialised`,
+since an import opens thousands of connections from parallel threads). `SCHEMA` only covers
+*new* databases — `CREATE TABLE IF NOT EXISTS` never alters an existing table — so a column
+added later must **also** be listed in `MIGRATIONS`, which `ALTER TABLE ADD COLUMN`s it into
+existing ones. Keep migrations additive. An index on a migrated column belongs in
+`_migrate()`, not `SCHEMA`, because on an old database the column does not exist yet when
+`SCHEMA` runs.
 
 Tenant resolution (`tenants.resolve_from_host`) needs `APP_DOMAIN` in production: without it,
 nothing distinguishes `acme.factures.example.com` (tenant "acme") from the bare application
@@ -87,6 +94,40 @@ Originals are written to `tenants/<slug>/files/<invoice_id><ext>` and served by
 `/invoices/{id}/file`, which re-resolves the path inside the tenant directory and verifies
 containment before serving — never a static mount, since these are client documents behind
 authentication.
+
+### Deduplication & storage
+
+Every document is fingerprinted (SHA-256 of its bytes) in `pipeline._process_one` *before*
+it is stored or sent to Claude. On the reference dataset 39 of 1181 files are exact copies —
+several are the same invoice filed in two monthly archives — which would otherwise be stored
+twice, extracted (paid) twice, and **counted twice in the Dashboard totals**. That last point
+is why this is a correctness feature, not just a storage one. A skipped copy is logged in the
+`duplicates` table (shown on the Invoices page) rather than silently dropped.
+
+Three rules to preserve:
+
+- **Check-and-claim is atomic.** `_BatchState.lock` covers both the lookup and the claim,
+  and `claimed` tracks fingerprints *within* the batch: the database only learns about the
+  first copy after its extraction finishes, so without the in-memory set two parallel
+  workers holding the same document would both import it.
+- **A failed import is retryable.** If the matching row has an `error` and no hand edits,
+  re-importing replaces it (`_can_retry`) — otherwise an API overload would become a
+  permanent failure. A row the user has edited is never replaced.
+- Invoices imported before fingerprints existed are hashed from their stored file by
+  `_backfill_fingerprints` when the column is first added, so they are recognised too.
+
+Storage is measured on disk (`tenants.storage_usage`: originals + SQLite files including
+`-wal`/`-shm`), not summed from `file_size`, so files orphaned by an interrupted import still
+count. The quota (`tenant.json` `storage_quota_mb`, else `DEFAULT_STORAGE_QUOTA_MB`, 0 =
+unlimited) is enforced twice: `start_import` refuses a batch when already full, and each
+worker checks the running total in `_BatchState.used_bytes` so a large batch stops at the cap
+instead of overshooting it. A refused file becomes an error row.
+
+Measured on the reference dataset: ~1.1 MB per invoice on average but a heavy tail (files
+over 5 MB are 2% of documents and 23% of volume), ~2 GB per client per year. Lossless PDF
+recompression gains nothing (they are scans); lossy re-rendering gains ~85% but is
+deliberately **not** applied — it may void the document's status as a faithful copy for
+legal retention, which is a product decision, not a technical one.
 
 ### The correction → rule loop
 

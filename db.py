@@ -7,8 +7,10 @@ not shareable across threads, and the import pipeline is multi-threaded.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
@@ -30,9 +32,20 @@ CREATE TABLE IF NOT EXISTS batches (
     total       INTEGER NOT NULL DEFAULT 0,
     done        INTEGER NOT NULL DEFAULT 0,
     failed      INTEGER NOT NULL DEFAULT 0,
+    duplicates  INTEGER NOT NULL DEFAULT 0,
     status      TEXT NOT NULL DEFAULT 'running',
     started_at  TEXT NOT NULL,
     finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS duplicates (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id     TEXT,
+    archive      TEXT,
+    filename     TEXT NOT NULL,
+    duplicate_of TEXT NOT NULL,
+    file_size    INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS invoices (
@@ -53,6 +66,8 @@ CREATE TABLE IF NOT EXISTS invoices (
     page_count       INTEGER DEFAULT 0,
     uncertain_fields TEXT NOT NULL DEFAULT '[]',
     edited_fields    TEXT NOT NULL DEFAULT '[]',
+    content_sha256   TEXT,
+    file_size        INTEGER,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
 );
@@ -106,17 +121,76 @@ def now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
 
 
+# Columns added after the first release. SCHEMA creates them on new databases;
+# existing tenant databases get them through ALTER TABLE, since CREATE TABLE IF
+# NOT EXISTS never alters a table that is already there. Additive only.
+MIGRATIONS = (
+    ("invoices", "content_sha256", "TEXT"),
+    ("invoices", "file_size", "INTEGER"),
+    ("batches", "duplicates", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+_initialised = set()
+_init_lock = threading.Lock()
+
+
+def _migrate(conn: sqlite3.Connection, slug: str) -> None:
+    added_hash = False
+    for table, column, declaration in MIGRATIONS:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info({})".format(table))}
+        if column not in columns:
+            conn.execute("ALTER TABLE {} ADD COLUMN {} {}".format(table, column, declaration))
+            added_hash = added_hash or column == "content_sha256"
+
+    # Created here rather than in SCHEMA: on an old database the column only
+    # exists once the ALTER TABLE above has run.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_invoices_sha ON invoices(content_sha256)")
+
+    if added_hash:
+        _backfill_fingerprints(conn, slug)
+
+
+def _backfill_fingerprints(conn: sqlite3.Connection, slug: str) -> None:
+    """Fingerprint invoices imported before deduplication existed, so a new
+    import recognises them too."""
+    directory = tenants.files_dir(slug)
+    rows = conn.execute(
+        "SELECT id, stored_name FROM invoices "
+        "WHERE content_sha256 IS NULL AND stored_name IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        path = directory / row["stored_name"]
+        if not path.is_file():
+            continue
+        content = path.read_bytes()
+        conn.execute(
+            "UPDATE invoices SET content_sha256 = ?, file_size = ? WHERE id = ?",
+            (hashlib.sha256(content).hexdigest(), len(content), row["id"]),
+        )
+
+
 @contextmanager
 def connect(slug: str) -> Iterator[sqlite3.Connection]:
     """Open (and initialise on first use) a tenant database."""
     tenants.create(slug)  # ensures the directory layout exists
-    connection = sqlite3.connect(str(tenants.database_path(slug)), timeout=30)
+    path = tenants.database_path(slug)
+    fresh_file = not path.exists()
+    connection = sqlite3.connect(str(path), timeout=30)
     connection.row_factory = sqlite3.Row
     try:
-        # WAL lets the web request read while import threads write.
-        connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA busy_timeout=30000")
-        connection.executescript(SCHEMA)
+        # Schema and migrations run once per database per process, not on every
+        # connection: an import opens thousands of them from parallel threads.
+        key = str(path)
+        with _init_lock:
+            if fresh_file or key not in _initialised:
+                # WAL lets the web request read while import threads write; the
+                # mode is persistent, so setting it once is enough.
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.executescript(SCHEMA)
+                _migrate(connection, slug)
+                connection.commit()
+                _initialised.add(key)
         yield connection
         connection.commit()
     finally:
@@ -159,11 +233,12 @@ def create_batch(slug: str, label: str, total: int) -> str:
     return batch_id
 
 
-def bump_batch(slug: str, batch_id: str, failed: bool) -> None:
+def bump_batch(slug: str, batch_id: str, failed: bool = False, duplicate: bool = False) -> None:
     with connect(slug) as conn:
         conn.execute(
-            "UPDATE batches SET done = done + 1, failed = failed + ? WHERE id = ?",
-            (1 if failed else 0, batch_id),
+            "UPDATE batches SET done = done + 1, failed = failed + ?, duplicates = duplicates + ? "
+            "WHERE id = ?",
+            (1 if failed else 0, 1 if duplicate else 0, batch_id),
         )
 
 
@@ -200,8 +275,8 @@ def insert_invoice(slug: str, record: Dict[str, Any]) -> str:
                 id, batch_id, archive, filename, stored_name, content_type,
                 supplier_name, invoice_number, invoice_date, total_amount, currency,
                 vat_amount, extraction_notes, error, page_count, uncertain_fields,
-                edited_fields, created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                edited_fields, content_sha256, file_size, created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 invoice_id,
@@ -221,11 +296,75 @@ def insert_invoice(slug: str, record: Dict[str, Any]) -> str:
                 record.get("page_count") or 0,
                 json.dumps(record.get("uncertain_fields") or [], ensure_ascii=False),
                 "[]",
+                record.get("content_sha256"),
+                record.get("file_size"),
                 timestamp,
                 timestamp,
             ),
         )
     return invoice_id
+
+
+def find_by_fingerprint(slug: str, content_sha256: str) -> Optional[sqlite3.Row]:
+    """The invoice already holding this exact document, if any.
+
+    A successful or hand-edited row wins over a failed one, so a document that
+    once failed extraction and was later retried is matched to the good copy.
+    """
+    with connect(slug) as conn:
+        return conn.execute(
+            """
+            SELECT id, filename, archive, error, edited_fields, stored_name, file_size
+            FROM invoices WHERE content_sha256 = ?
+            ORDER BY (error IS NULL) DESC, created_at
+            LIMIT 1
+            """,
+            (content_sha256,),
+        ).fetchone()
+
+
+def delete_invoice(slug: str, invoice_id: str) -> None:
+    with connect(slug) as conn:
+        conn.execute("DELETE FROM invoices WHERE id = ?", (invoice_id,))
+
+
+def record_duplicate(
+    slug: str,
+    batch_id: str,
+    filename: str,
+    archive: Optional[str],
+    duplicate_of: str,
+    file_size: int,
+) -> None:
+    with connect(slug) as conn:
+        conn.execute(
+            "INSERT INTO duplicates (batch_id, archive, filename, duplicate_of, file_size, created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (batch_id, archive, filename, duplicate_of, file_size, now()),
+        )
+
+
+def list_duplicates(slug: str, limit: int = 50) -> List[sqlite3.Row]:
+    with connect(slug) as conn:
+        return conn.execute(
+            """
+            SELECT d.filename, d.archive, d.file_size, d.created_at, d.duplicate_of,
+                   i.filename AS original_filename, i.archive AS original_archive,
+                   i.stored_name AS original_stored_name
+            FROM duplicates d LEFT JOIN invoices i ON i.id = d.duplicate_of
+            ORDER BY d.created_at DESC, d.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+
+def duplicate_summary(slug: str) -> Dict[str, int]:
+    with connect(slug) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, IFNULL(SUM(file_size), 0) AS bytes FROM duplicates"
+        ).fetchone()
+    return {"count": row["n"], "bytes": row["bytes"]}
 
 
 def _filter_clause(filters: Dict[str, Any]):

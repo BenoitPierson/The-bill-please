@@ -30,6 +30,10 @@ MAX_CONCURRENT_EXTRACTIONS = int(os.environ.get("MAX_CONCURRENT_EXTRACTIONS", "8
 # refreshed automatically (see learning.py).
 AUTO_LEARN_THRESHOLD = int(os.environ.get("AUTO_LEARN_THRESHOLD", "3"))
 
+# Storage cap applied to every client workspace that has no quota of its own
+# (set per client with `manage.py set-quota`). 0 means unlimited.
+DEFAULT_STORAGE_QUOTA_MB = int(os.environ.get("DEFAULT_STORAGE_QUOTA_MB", "0"))
+
 SESSION_COOKIE = "invoice_session"
 SESSION_MAX_AGE = 60 * 60 * 12  # 12 hours
 

@@ -101,7 +101,9 @@
           const percent = batch.total ? (batch.done / batch.total) * 100 : 0;
           progressBar.style.width = percent + "%";
           progressText.textContent =
-            `${batch.done} / ${batch.total}` + (batch.failed ? ` · ${batch.failed} en erreur` : "");
+            `${batch.done} / ${batch.total}` +
+            (batch.failed ? ` · ${batch.failed} en erreur` : "") +
+            (batch.duplicates ? ` · ${batch.duplicates} doublon(s) ignore(s)` : "");
 
           if (batch.status !== "running") {
             clearInterval(timer);

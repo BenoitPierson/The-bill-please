@@ -327,6 +327,25 @@ code { background: var(--plane); padding: 1px 5px; border-radius: 4px; }
 .progress { flex: 1; height: 8px; background: var(--series-1-soft); border-radius: 999px; overflow: hidden; }
 .progress-bar { height: 100%; width: 0; background: var(--series-1); transition: width .3s ease; }
 
+/* ----------------------------------------------------------------- storage */
+
+.storage { display: flex; flex-direction: column; justify-content: center; gap: 4px; margin-right: 8px; }
+.storage-label { font-size: 12px; color: var(--ink-secondary); white-space: nowrap; }
+.storage-track { width: 150px; height: 6px; background: var(--grid); border-radius: 999px; overflow: hidden; }
+.storage-fill { height: 100%; background: var(--series-1); }
+/* Approaching the quota is a state, so it pairs colour with the label text. */
+.storage-warn .storage-fill { background: var(--warning); }
+.storage-warn .storage-label::after { content: " — bientot plein"; color: #8a5a00; }
+.storage-critical .storage-fill { background: var(--critical); }
+.storage-critical .storage-label::after { content: " — quota presque atteint"; color: #7d1d1d; }
+
+.dup-table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 8px 0; }
+.dup-table th {
+  text-align: left; font-size: 12px; color: var(--ink-secondary);
+  padding: 7px 8px; border-bottom: 1px solid var(--border);
+}
+.dup-table td { padding: 7px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+
 /* ------------------------------------------------------------------- rules */
 
 .rules-card summary { cursor: pointer; font-weight: 600; }

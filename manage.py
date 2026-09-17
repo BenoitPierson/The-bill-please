@@ -4,6 +4,8 @@
     python manage.py add-tenant acme --name "ACME SARL"
     python manage.py add-user acme compta@acme.fr
     python manage.py reset-password acme compta@acme.fr
+    python manage.py storage acme
+    python manage.py set-quota acme 5000        # Mo ; 0 = illimite
 """
 from __future__ import annotations
 
@@ -19,6 +21,15 @@ load_dotenv()
 import auth  # noqa: E402  (after load_dotenv, like the app does)
 import db  # noqa: E402
 import tenants  # noqa: E402
+from charts import format_bytes  # noqa: E402
+
+
+def _quota_text(slug: str) -> str:
+    quota = tenants.storage_quota_bytes(slug)
+    if not quota:
+        return "illimite"
+    used = tenants.storage_usage(slug)["total_bytes"]
+    return "{} ({:.0f}%)".format(format_bytes(quota), 100.0 * used / quota)
 
 
 def _read_password() -> str:
@@ -39,15 +50,77 @@ def cmd_tenants(_args) -> int:
     if not slugs:
         print("Aucun espace client. Cree le premier avec : python manage.py add-tenant <slug>")
         return 0
+    print("{:<18} {:<26} {:>6} {:>9} {:>10}  {}".format(
+        "ESPACE", "NOM", "COMPTES", "FACTURES", "STOCKAGE", "QUOTA"))
     for slug in slugs:
         with db.connect(slug) as conn:
             users = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
             invoices = conn.execute("SELECT COUNT(*) AS n FROM invoices").fetchone()["n"]
         print(
-            "{:<20} {:<28} {:>4} utilisateur(s)  {:>6} facture(s)".format(
-                slug, tenants.display_name(slug), users, invoices
+            "{:<18} {:<26} {:>6} {:>9} {:>10}  {}".format(
+                slug,
+                tenants.display_name(slug)[:26],
+                users,
+                invoices,
+                format_bytes(tenants.storage_usage(slug)["total_bytes"]),
+                _quota_text(slug),
             )
         )
+    return 0
+
+
+def cmd_storage(args) -> int:
+    if not tenants.exists(args.slug):
+        print("Espace inconnu : {}".format(args.slug))
+        return 1
+
+    usage = tenants.storage_usage(args.slug)
+    duplicates = db.duplicate_summary(args.slug)
+    with db.connect(args.slug) as conn:
+        stats = conn.execute(
+            """
+            SELECT COUNT(*) AS n, IFNULL(AVG(file_size), 0) AS mean, IFNULL(MAX(file_size), 0) AS biggest,
+                   SUM(CASE WHEN file_size > 5 * 1024 * 1024 THEN 1 ELSE 0 END) AS heavy_count,
+                   IFNULL(SUM(CASE WHEN file_size > 5 * 1024 * 1024 THEN file_size ELSE 0 END), 0) AS heavy_bytes
+            FROM invoices WHERE file_size IS NOT NULL
+            """
+        ).fetchone()
+        heaviest = conn.execute(
+            "SELECT filename, file_size FROM invoices WHERE file_size IS NOT NULL "
+            "ORDER BY file_size DESC LIMIT 5"
+        ).fetchall()
+
+    print("Espace {} ({})".format(args.slug, tenants.display_name(args.slug)))
+    print("  Total occupe          : {}".format(format_bytes(usage["total_bytes"])))
+    print("    documents originaux : {} ({} fichier(s))".format(
+        format_bytes(usage["files_bytes"]), usage["file_count"]))
+    print("    base de donnees     : {}".format(format_bytes(usage["db_bytes"])))
+    print("  Quota                 : {}".format(_quota_text(args.slug)))
+    if stats["n"]:
+        print("  Taille par facture    : moyenne {}, max {}".format(
+            format_bytes(stats["mean"]), format_bytes(stats["biggest"])))
+        if stats["heavy_count"]:
+            print("  Factures > 5 Mo       : {} fichier(s), {} ({:.0f}% des originaux)".format(
+                stats["heavy_count"], format_bytes(stats["heavy_bytes"]),
+                100.0 * stats["heavy_bytes"] / max(usage["files_bytes"], 1)))
+    print("  Doublons ignores      : {} fichier(s), {} evite(s)".format(
+        duplicates["count"], format_bytes(duplicates["bytes"])))
+    if heaviest:
+        print("  Plus gros documents :")
+        for row in heaviest:
+            print("    {:>9}  {}".format(format_bytes(row["file_size"]), row["filename"]))
+    return 0
+
+
+def cmd_set_quota(args) -> int:
+    if not tenants.exists(args.slug):
+        print("Espace inconnu : {}".format(args.slug))
+        return 1
+    if args.megabytes < 0:
+        print("Le quota doit etre positif (0 = illimite).")
+        return 1
+    tenants.set_storage_quota(args.slug, args.megabytes)
+    print("Quota de {} : {}".format(args.slug, _quota_text(args.slug)))
     return 0
 
 
@@ -112,6 +185,15 @@ def main() -> int:
     reset.add_argument("slug")
     reset.add_argument("email")
     reset.set_defaults(func=cmd_reset_password)
+
+    storage = sub.add_parser("storage", help="Detail de l'espace occupe par un client")
+    storage.add_argument("slug")
+    storage.set_defaults(func=cmd_storage)
+
+    quota = sub.add_parser("set-quota", help="Fixer le quota de stockage d'un client")
+    quota.add_argument("slug")
+    quota.add_argument("megabytes", type=int, help="Quota en Mo (0 = illimite)")
+    quota.set_defaults(func=cmd_set_quota)
 
     args = parser.parse_args()
     if not getattr(args, "func", None):

@@ -50,6 +50,16 @@ def format_compact(value: Any) -> str:
     return format_amount(number, 0)
 
 
+def format_bytes(value: Any) -> str:
+    """Human file size in French units: 845 Ko / 12,4 Mo / 1,3 Go."""
+    size = float(value or 0)
+    for threshold, unit in ((1024 ** 3, "Go"), (1024 ** 2, "Mo"), (1024, "Ko")):
+        if size >= threshold:
+            text = "{:.1f}".format(size / threshold).rstrip("0").rstrip(".")
+            return "{} {}".format(text.replace(".", ","), unit)
+    return "{:.0f} o".format(size)
+
+
 def nice_ceiling(value: float) -> float:
     """Round a maximum up to a readable axis bound (1 / 2 / 2.5 / 5 x 10^n)."""
     if value <= 0:

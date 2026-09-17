@@ -69,6 +69,26 @@ minutes et 10 à 12 € pour un lot de 1000 factures.
 Les fichiers qui ne sont ni des PDF ni des images apparaissent quand même dans le tableau,
 avec une erreur expliquant qu'ils ont été ignorés : rien ne disparaît silencieusement.
 
+### Doublons
+
+Chaque document reçoit une empreinte numérique à l'import. Un document **strictement
+identique** à une facture déjà importée — dans un lot précédent ou dans le même lot — est
+ignoré : il n'est ni stocké, ni envoyé à l'extraction (donc pas facturé), ni compté deux fois
+dans les totaux du Dashboard. Le panneau « Doublons ignorés à l'import » de l'onglet Invoices
+liste ces documents et renvoie vers la facture d'origine.
+
+Sur tes archives de référence : 39 doublons sur 1181 fichiers, soit 100 Mo évités — dont
+plusieurs factures présentes à la fois dans deux archives mensuelles.
+
+Seule exception : si la première importation d'un document avait **échoué** (par exemple une
+surcharge de l'API), le réimporter relance l'extraction et remplace la ligne en erreur.
+
+### Espace de stockage
+
+L'espace occupé par l'espace client (factures originales + base de données) est affiché en
+haut de l'onglet Invoices. Si un quota est défini, une jauge l'accompagne : orange au-delà de
+80 %, rouge au-delà de 95 %. Une fois le quota atteint, les nouveaux imports sont refusés.
+
 ## Administration des espaces clients
 
 ```
@@ -76,7 +96,16 @@ python manage.py tenants                              # lister les espaces
 python manage.py add-tenant acme --name "ACME SARL"   # créer un espace client
 python manage.py add-user acme compta@acme.fr         # créer un compte
 python manage.py reset-password acme compta@acme.fr   # changer un mot de passe
+python manage.py storage acme                         # détail de l'espace occupé
+python manage.py set-quota acme 5000                  # quota en Mo (0 = illimité)
 ```
+
+`tenants` affiche l'espace occupé et le quota de chaque client. `storage` détaille la part
+des factures originales et de la base, la taille moyenne par facture, le poids des fichiers
+de plus de 5 Mo, l'espace évité par le dédoublonnage et les plus gros documents.
+
+Ordre de grandeur mesuré sur des factures réelles : ~1,1 Mo par facture, soit environ 2 Go par
+an pour un client traitant ~170 factures par mois.
 
 Un espace `acme` est servi sur `https://acme.<votre-domaine>`. En local, tout passe par
 l'espace par défaut sur http://127.0.0.1:8000.
@@ -93,6 +122,7 @@ Variables d'environnement à définir (dans `.env` ou dans l'hébergeur) :
 | `DATA_DIR` | Emplacement des données (défaut : `./data`). **Le seul dossier à sauvegarder** |
 | `MAX_CONCURRENT_EXTRACTIONS` | Factures traitées en parallèle (défaut : 8) |
 | `AUTO_LEARN_THRESHOLD` | Corrections avant analyse automatique (défaut : 3) |
+| `DEFAULT_STORAGE_QUOTA_MB` | Quota appliqué aux clients sans quota propre, en Mo (défaut : 0 = illimité) |
 
 À prévoir également : servir en HTTPS derrière un reverse proxy, passer `https_only=True` sur
 la session dans `app.py`, faire pointer un DNS joker `*.<domaine>` vers le serveur, et

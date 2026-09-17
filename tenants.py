@@ -8,11 +8,12 @@ holding their data, so one client's rows can never be returned to another.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
-from config import APP_DOMAIN, DEFAULT_TENANT, LOCAL_HOSTS, TENANTS_DIR
+from config import APP_DOMAIN, DEFAULT_STORAGE_QUOTA_MB, DEFAULT_TENANT, LOCAL_HOSTS, TENANTS_DIR
 
 SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 
@@ -39,14 +40,69 @@ def exists(slug: str) -> bool:
     return is_valid_slug(slug) and tenant_dir(slug).is_dir()
 
 
-def display_name(slug: str) -> str:
+def _read_meta(slug: str) -> Dict[str, Any]:
     meta = tenant_dir(slug) / "tenant.json"
     if meta.exists():
         try:
-            return json.loads(meta.read_text(encoding="utf-8")).get("display_name", slug)
+            return json.loads(meta.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             pass
-    return slug
+    return {}
+
+
+def _write_meta(slug: str, values: Dict[str, Any]) -> None:
+    meta = _read_meta(slug)
+    meta.update(values)
+    (tenant_dir(slug) / "tenant.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def display_name(slug: str) -> str:
+    return _read_meta(slug).get("display_name", slug)
+
+
+def storage_usage(slug: str) -> Dict[str, int]:
+    """Bytes actually on disk for a client: stored originals plus its database.
+
+    Measured on disk rather than summed from the database, so files left behind
+    by an interrupted import are counted too.
+    """
+    files_bytes = file_count = 0
+    directory = files_dir(slug)
+    if directory.is_dir():
+        with os.scandir(str(directory)) as entries:
+            for entry in entries:
+                if entry.is_file():
+                    files_bytes += entry.stat().st_size
+                    file_count += 1
+
+    db_bytes = 0
+    database = database_path(slug)
+    # WAL mode keeps recent writes in side files until checkpoint.
+    for suffix in ("", "-wal", "-shm"):
+        path = Path(str(database) + suffix)
+        if path.is_file():
+            db_bytes += path.stat().st_size
+
+    return {
+        "files_bytes": files_bytes,
+        "file_count": file_count,
+        "db_bytes": db_bytes,
+        "total_bytes": files_bytes + db_bytes,
+    }
+
+
+def storage_quota_bytes(slug: str) -> int:
+    """The client's storage cap in bytes; 0 means unlimited."""
+    quota_mb = _read_meta(slug).get("storage_quota_mb")
+    if quota_mb is None:
+        quota_mb = DEFAULT_STORAGE_QUOTA_MB
+    return max(0, int(quota_mb)) * 1024 * 1024
+
+
+def set_storage_quota(slug: str, quota_mb: int) -> None:
+    _write_meta(slug, {"storage_quota_mb": max(0, int(quota_mb))})
 
 
 def create(slug: str, name: Optional[str] = None) -> Path:

@@ -60,6 +60,7 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 templates.env.filters["amount"] = charts.format_amount
 templates.env.filters["compact"] = charts.format_compact
+templates.env.filters["filesize"] = charts.format_bytes
 
 _client: Optional[Anthropic] = None
 
@@ -296,9 +297,26 @@ def invoices(request: Request) -> Response:
             "editable_fields": list(db.EDITABLE_FIELDS),
             "rules": [dict(r) for r in db.list_rules(slug)],
             "batches": [dict(b) for b in db.active_batches(slug)],
+            "storage": _storage_view(slug),
+            "duplicates": [dict(d) for d in db.list_duplicates(slug)],
+            "duplicate_summary": db.duplicate_summary(slug),
         }
     )
     return templates.TemplateResponse("invoices.html", context)
+
+
+def _storage_view(slug: str) -> Dict[str, Any]:
+    usage = tenants.storage_usage(slug)
+    quota = tenants.storage_quota_bytes(slug)
+    percent = min(100.0, 100.0 * usage["total_bytes"] / quota) if quota else None
+    return {
+        "used": usage["total_bytes"],
+        "files": usage["file_count"],
+        "quota": quota,
+        "percent": percent,
+        # Warn before imports start failing on the quota, not after.
+        "level": None if percent is None else ("critical" if percent >= 95 else "warn" if percent >= 80 else "ok"),
+    }
 
 
 def _row_to_view(row) -> Dict[str, Any]:
