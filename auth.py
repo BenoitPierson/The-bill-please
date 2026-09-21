@@ -10,7 +10,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
-from typing import Optional
+import threading
+import time
+from typing import Dict, Optional
 
 import db
 
@@ -56,6 +58,46 @@ def authenticate(slug: str, email: str, password: str) -> Optional[str]:
     if not verify_password(password, user["password_hash"]):
         return None
     return user["email"]
+
+
+# --------------------------------------------------------------- login throttling
+
+# Password guessing is otherwise limited only by scrypt's cost. Counters live in
+# the process (one server, one process): enough to make online brute force
+# pointless, and it forgets everything on restart. A distributed deployment
+# needs this at the reverse proxy instead.
+FAILURE_WINDOW = 15 * 60
+FAILURES_BEFORE_LOCK = 5
+LOCK_SECONDS = 5 * 60
+
+_failures: Dict[str, list] = {}
+_failures_lock = threading.Lock()
+
+
+def _prune(attempts: list, now: float) -> list:
+    return [t for t in attempts if now - t < FAILURE_WINDOW]
+
+
+def locked_seconds(key: str) -> int:
+    """Seconds the caller must wait before another attempt is accepted."""
+    now = time.time()
+    with _failures_lock:
+        attempts = _prune(_failures.get(key, []), now)
+        _failures[key] = attempts
+        if len(attempts) < FAILURES_BEFORE_LOCK:
+            return 0
+        return max(0, int(LOCK_SECONDS - (now - attempts[-1])))
+
+
+def record_failure(key: str) -> None:
+    now = time.time()
+    with _failures_lock:
+        _failures[key] = _prune(_failures.get(key, []), now) + [now]
+
+
+def clear_failures(key: str) -> None:
+    with _failures_lock:
+        _failures.pop(key, None)
 
 
 def password_problem(password: str) -> Optional[str]:

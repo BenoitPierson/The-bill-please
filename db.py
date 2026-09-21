@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS batches (
     duplicates  INTEGER NOT NULL DEFAULT 0,
     status      TEXT NOT NULL DEFAULT 'running',
     started_at  TEXT NOT NULL,
-    finished_at TEXT
+    finished_at TEXT,
+    started_by      TEXT,
+    acknowledged_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS duplicates (
@@ -128,6 +130,8 @@ MIGRATIONS = (
     ("invoices", "content_sha256", "TEXT"),
     ("invoices", "file_size", "INTEGER"),
     ("batches", "duplicates", "INTEGER NOT NULL DEFAULT 0"),
+    ("batches", "started_by", "TEXT"),
+    ("batches", "acknowledged_at", "TEXT"),
 )
 
 _initialised = set()
@@ -135,12 +139,21 @@ _init_lock = threading.Lock()
 
 
 def _migrate(conn: sqlite3.Connection, slug: str) -> None:
-    added_hash = False
+    added = set()
     for table, column, declaration in MIGRATIONS:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info({})".format(table))}
         if column not in columns:
             conn.execute("ALTER TABLE {} ADD COLUMN {} {}".format(table, column, declaration))
-            added_hash = added_hash or column == "content_sha256"
+            added.add(column)
+    added_hash = "content_sha256" in added
+
+    if "acknowledged_at" in added:
+        # Imports finished before the summary pop-up existed: nobody is waiting
+        # for their summary, so it must not surface on the next page load.
+        conn.execute(
+            "UPDATE batches SET acknowledged_at = IFNULL(finished_at, started_at) "
+            "WHERE status != 'running'"
+        )
 
     # Created here rather than in SCHEMA: on an old database the column only
     # exists once the ALTER TABLE above has run.
@@ -223,12 +236,12 @@ def get_user(slug: str, email: str) -> Optional[sqlite3.Row]:
 # -------------------------------------------------------------------------- batches
 
 
-def create_batch(slug: str, label: str, total: int) -> str:
+def create_batch(slug: str, label: str, total: int, started_by: Optional[str] = None) -> str:
     batch_id = uuid.uuid4().hex
     with connect(slug) as conn:
         conn.execute(
-            "INSERT INTO batches (id, label, total, started_at) VALUES (?, ?, ?, ?)",
-            (batch_id, label, total, now()),
+            "INSERT INTO batches (id, label, total, started_at, started_by) VALUES (?, ?, ?, ?, ?)",
+            (batch_id, label, total, now(), started_by),
         )
     return batch_id
 
@@ -260,6 +273,119 @@ def active_batches(slug: str) -> List[sqlite3.Row]:
         return conn.execute(
             "SELECT * FROM batches WHERE status = 'running' ORDER BY started_at DESC"
         ).fetchall()
+
+
+def pending_summary_batch(slug: str, email: str) -> Optional[str]:
+    """The most recent finished import whose summary its author hasn't closed.
+
+    Lets the summary survive the user leaving the page mid-import: it is shown
+    on their next page load instead of being lost. Scoped to the person who
+    started the import, so a colleague isn't handed someone else's summary.
+    """
+    with connect(slug) as conn:
+        row = conn.execute(
+            """
+            SELECT id FROM batches
+            WHERE status != 'running' AND acknowledged_at IS NULL
+              AND (started_by IS NULL OR started_by = ? COLLATE NOCASE)
+            ORDER BY IFNULL(finished_at, started_at) DESC, started_at DESC
+            LIMIT 1
+            """,
+            (email,),
+        ).fetchone()
+    return row["id"] if row else None
+
+
+def acknowledge_batch(slug: str, batch_id: str) -> None:
+    with connect(slug) as conn:
+        conn.execute(
+            "UPDATE batches SET acknowledged_at = ? WHERE id = ? AND acknowledged_at IS NULL",
+            (now(), batch_id),
+        )
+
+
+# Every error message the import can record, grouped by what the user can do
+# about it. Matched on the message's opening words, which are written by
+# extraction.py and pipeline.py — keep these in step when adding a new error.
+ERROR_KINDS = (
+    ("quota", ("Quota de stockage",)),
+    ("unsupported", (
+        "Format non pris en charge", "Archive illisible", "Archive trop imbriquee",
+        "Aucune facture", "Aucune page", "Lecture impossible", "Impossible de lire le fichier",
+    )),
+    ("extraction", ("Erreur API", "Extraction refusee", "Reponse vide", "JSON invalide")),
+)
+
+
+def error_kind(message: Optional[str]) -> str:
+    text = (message or "").strip()
+    for kind, prefixes in ERROR_KINDS:
+        if text.startswith(prefixes):
+            return kind
+    return "other"
+
+
+def batch_summary(slug: str, batch_id: str, examples: int = 8) -> Optional[Dict[str, Any]]:
+    """What an import produced, counted from the rows it actually wrote."""
+    with connect(slug) as conn:
+        batch = conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
+        if batch is None:
+            return None
+
+        counts = conn.execute(
+            """
+            SELECT SUM(CASE WHEN error IS NULL THEN 1 ELSE 0 END) AS succeeded,
+                   SUM(CASE WHEN error IS NULL AND uncertain_fields != '[]' THEN 1 ELSE 0 END) AS needs_review,
+                   SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS failed
+            FROM invoices WHERE batch_id = ?
+            """,
+            (batch_id,),
+        ).fetchone()
+        error_rows = conn.execute(
+            "SELECT filename, archive, error FROM invoices "
+            "WHERE batch_id = ? AND error IS NOT NULL ORDER BY filename",
+            (batch_id,),
+        ).fetchall()
+        duplicate_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM duplicates WHERE batch_id = ?", (batch_id,)
+        ).fetchone()["n"]
+        duplicate_rows = conn.execute(
+            """
+            SELECT d.filename, d.archive, i.filename AS original_filename
+            FROM duplicates d LEFT JOIN invoices i ON i.id = d.duplicate_of
+            WHERE d.batch_id = ? ORDER BY d.filename LIMIT ?
+            """,
+            (batch_id, examples),
+        ).fetchall()
+
+    succeeded = counts["succeeded"] or 0
+    failed = counts["failed"] or 0
+    by_kind = {"extraction": 0, "unsupported": 0, "quota": 0, "other": 0}
+    for row in error_rows:
+        by_kind[error_kind(row["error"])] += 1
+
+    return {
+        "batch_id": batch["id"],
+        "label": batch["label"],
+        "status": batch["status"],
+        "started_at": batch["started_at"],
+        "finished_at": batch["finished_at"],
+        "total": batch["total"],
+        "succeeded": succeeded,
+        "needs_review": counts["needs_review"] or 0,
+        "duplicates": duplicate_count,
+        "failed": failed,
+        "failed_by_kind": by_kind,
+        # Documents the import never reached: an interrupted batch, or a worker
+        # that crashed before writing anything.
+        "not_processed": max(0, batch["total"] - succeeded - failed - duplicate_count),
+        "failures": [
+            {"filename": r["filename"], "archive": r["archive"], "error": r["error"],
+             "kind": error_kind(r["error"])}
+            for r in error_rows[:examples]
+        ],
+        "duplicate_examples": [dict(r) for r in duplicate_rows],
+    }
 
 
 # ------------------------------------------------------------------------- invoices
@@ -392,6 +518,11 @@ def _filter_clause(filters: Dict[str, Any]):
             "(supplier_name LIKE ? OR invoice_number LIKE ? OR filename LIKE ? OR archive LIKE ?)"
         )
         params.extend(["%{}%".format(search)] * 4)
+
+    batch = (filters.get("batch") or "").strip()
+    if batch:
+        where.append("batch_id = ?")
+        params.append(batch)
 
     status = (filters.get("status") or "").strip()
     if status == "errors":

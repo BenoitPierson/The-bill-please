@@ -35,15 +35,17 @@ des principaux fournisseurs. Filtrable par fournisseur et par période.
   (`1 234,56`).
 - **Filtres** : fournisseur, période, état (à vérifier / en erreur / sans erreur), recherche
   libre.
-- **Consultation de l'original** : clique sur le nom du fichier pour afficher la facture
-  d'origine (PDF ou photo) sans quitter la page.
+- **Vérification contre l'original** : clique sur le nom du fichier pour afficher la facture
+  d'origine (PDF ou photo) avec, juste à côté, les champs lus par l'automate. Tu les corriges
+  en regardant le document ; les boutons « Précédente / Suivante » enchaînent les factures
+  du tableau sans refermer la fenêtre.
 - **Export Excel** : exporte exactement ce que les filtres affichent, avec le même code
   couleur et une feuille « Légende ».
 
-## Comment Claude apprend de tes corrections
+## Comment l'automate apprend de tes corrections
 
 Chaque correction manuelle est enregistrée. Quand plusieurs corrections s'accumulent,
-Claude les analyse et en déduit une **consigne courte et généralisable**, stockée par
+l'automate les analyse et en déduit une **consigne courte et généralisable**, stockée par
 fournisseur — par exemple : *« Pour ce fournisseur, ne pas utiliser le long numéro figurant
 près du code-barres comme numéro de facture ; retenir la référence au format MAF-XXXXX. »*
 
@@ -51,7 +53,7 @@ Ces consignes sont automatiquement injectées dans les instructions d'extraction
 suivants. Le principe : on n'enregistre pas la valeur corrigée (qui ne servirait qu'une fois),
 mais la **règle** derrière la correction (qui vaut pour toutes les factures à venir).
 
-Le panneau « Ce que Claude a appris de vos corrections » sur l'onglet Invoices liste ces
+Le panneau « Ce que l'automate a appris de vos corrections » sur l'onglet Invoices liste ces
 règles, permet de les déclencher manuellement, et d'en supprimer une qui ne conviendrait pas.
 
 ## Import de factures
@@ -62,9 +64,18 @@ Bouton « Importer des factures » sur l'onglet Invoices. Accepte :
 - des **dossiers compressés `.zip`**, y compris avec des sous-dossiers (par mois, par
   fournisseur) et des archives imbriquées
 
-L'import tourne en arrière-plan : la barre de progression suit l'avancement et tu peux
-continuer à naviguer. Les factures sont traitées 8 en parallèle — compte environ 30 à 45
+L'import tourne en arrière-plan : la barre de progression suit l'avancement, un compte à
+rebours indique le temps restant estimé, et tu peux continuer à naviguer. La première
+estimation repose sur des temps mesurés (~10 s par facture) ; elle s'ajuste ensuite au débit
+réellement observé pendant l'import. Si le serveur redémarre en cours d'import, la page
+l'indique : redépose les mêmes fichiers, les factures déjà intégrées seront ignorées. Les factures sont traitées 8 en parallèle — compte environ 30 à 45
 minutes et 10 à 12 € pour un lot de 1000 factures.
+
+À la fin de l'import, une fenêtre **Bilan de l'import** récapitule le lot : factures intégrées
+avec succès (dont celles à vérifier), doublons ignorés, factures non intégrées par cause
+(échec d'extraction, fichier non exploitable, quota atteint), avec la liste des fichiers
+concernés et des liens pour filtrer le tableau sur cet import. Si tu as quitté la page pendant
+l'import, le bilan s'affiche à ta prochaine visite, jusqu'à ce que tu le fermes.
 
 Les fichiers qui ne sont ni des PDF ni des images apparaissent quand même dans le tableau,
 avec une erreur expliquant qu'ils ont été ignorés : rien ne disparaît silencieusement.

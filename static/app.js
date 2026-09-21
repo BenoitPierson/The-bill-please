@@ -33,7 +33,13 @@
         const size = file.size > 1e6
           ? (file.size / 1e6).toFixed(1) + " Mo"
           : Math.max(1, Math.round(file.size / 1024)) + " Ko";
-        item.innerHTML = `<span>${file.name} <span class="muted small">${size}</span></span>`;
+        const label = document.createElement("span");
+        label.textContent = file.name + " ";
+        const sizeEl = document.createElement("span");
+        sizeEl.className = "muted small";
+        sizeEl.textContent = size;
+        label.appendChild(sizeEl);
+        item.appendChild(label);
         const remove = document.createElement("button");
         remove.className = "btn btn-ghost btn-sm";
         remove.textContent = "Retirer";
@@ -89,11 +95,58 @@
       }
     });
 
+    const etaText = $("#etaText");
+
+    // Elapsed time is exact, so it is shown to the second.
+    function formatDuration(seconds) {
+      const s = Math.max(0, Math.round(seconds));
+      if (s < 60) return `${s} s`;
+      if (s < 3600) return `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} s`;
+      return `${Math.floor(s / 3600)} h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")} min`;
+    }
+
+    // Remaining time is an estimate: rounded so it doesn't pretend to a
+    // precision it doesn't have, coarser as the horizon grows.
+    function formatRemaining(seconds) {
+      const s = Math.max(0, seconds);
+      if (s < 10) return "quelques secondes";
+      if (s < 60) return `~${Math.ceil(s / 5) * 5} s`;
+      if (s < 600) {
+        const rounded = Math.ceil(s / 10) * 10;
+        const rest = rounded % 60;
+        return `~${Math.floor(rounded / 60)} min` + (rest ? ` ${rest} s` : "");
+      }
+      if (s < 3600) return `~${Math.ceil(s / 60)} min`;
+      const minutes = Math.ceil(s / 300) * 5;
+      return `~${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+    }
+
     function watchBatch(batchId, total) {
       progressWrap.hidden = false;
-      progressText.textContent = `0 / ${total}`;
+      progressText.textContent = total ? `0 / ${total}` : "";
+      etaText.hidden = false;
+      etaText.textContent = "Calcul du temps restant...";
 
-      const timer = setInterval(async () => {
+      // Last values received from the server, and when: the display counts
+      // down locally every second and is re-anchored on each poll.
+      let latest = null;
+      let receivedAt = 0;
+
+      const render = () => {
+        if (!latest) return;
+        const since = (Date.now() - receivedAt) / 1000;
+        const remaining = latest.eta_seconds - since;
+        const elapsed = (latest.elapsed_seconds || 0) + since;
+        etaText.textContent =
+          `Temps restant estime : ${formatRemaining(remaining)}` +
+          (latest.eta_basis === "initiale" ? " (premiere estimation)" : "") +
+          ` · ecoule : ${formatDuration(elapsed)}`;
+      };
+      const ticker = setInterval(render, 1000);
+
+      const stop = () => { clearInterval(ticker); clearInterval(poller); };
+
+      const poll = async () => {
         try {
           const response = await fetch(`/api/batches/${batchId}`);
           if (!response.ok) throw new Error();
@@ -105,16 +158,37 @@
             (batch.failed ? ` · ${batch.failed} en erreur` : "") +
             (batch.duplicates ? ` · ${batch.duplicates} doublon(s) ignore(s)` : "");
 
-          if (batch.status !== "running") {
-            clearInterval(timer);
-            progressText.textContent = "Termine — actualisation...";
-            setTimeout(() => window.location.reload(), 800);
+          if (batch.status === "running") {
+            latest = batch;
+            receivedAt = Date.now();
+            render();
+            return;
           }
+
+          stop();
+          if (batch.status === "done") {
+            progressBar.style.width = "100%";
+            etaText.textContent = batch.elapsed_seconds != null
+              ? `Termine en ${formatDuration(batch.elapsed_seconds)}.`
+              : "Termine.";
+          } else if (batch.status === "interrupted") {
+            etaText.textContent =
+              "Import interrompu par un redemarrage du serveur. Redepose les memes fichiers " +
+              "pour terminer : les factures deja integrees seront reconnues et ignorees.";
+          } else {
+            etaText.textContent = "Import interrompu par une erreur — consulte les lignes en erreur.";
+          }
+          // Whatever the outcome, the user gets the summary; the table is
+          // refreshed when they close it.
+          showImportSummary(batchId);
         } catch (error) {
-          clearInterval(timer);
-          progressText.textContent = "Suivi interrompu — actualise la page pour voir l'avancement.";
+          stop();
+          etaText.textContent = "Suivi interrompu — actualise la page pour voir l'avancement.";
         }
-      }, 2000);
+      };
+
+      const poller = setInterval(poll, 2000);
+      poll();
     }
 
     // An import started before this page was loaded is still worth following.
@@ -127,48 +201,63 @@
 
   /* -------------------------------------------------------- cell editing */
 
-  $$(".cell-input").forEach((input) => {
-    input.dataset.original = input.value;
+  // One save path for both editing surfaces: the table cells and the panel
+  // beside the original document. `holder` is the element carrying the
+  // review state classes (a table cell, or a field of the panel).
+  async function saveField(invoiceId, input, holder, onSaved) {
+    const value = input.value;
+    if (value === input.dataset.original) return;
 
-    const save = async () => {
-      const value = input.value;
-      if (value === input.dataset.original) return;
+    holder.classList.add("is-saving");
+    holder.classList.remove("is-failed");
+    try {
+      const response = await fetch(`/api/invoices/${encodeURIComponent(invoiceId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ field: input.dataset.field, value: value }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Enregistrement refuse");
 
-      const cell = input.closest(".cell");
-      const invoiceId = input.closest("tr").dataset.id;
-      cell.classList.add("is-saving");
-      cell.classList.remove("is-failed");
-
-      try {
-        const response = await fetch(`/api/invoices/${invoiceId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ field: input.dataset.field, value: value }),
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Enregistrement refuse");
-
-        input.dataset.original = value;
-        cell.classList.remove("is-uncertain");
-        cell.classList.add("is-edited");
-        cell.title = "Champ corrige a la main";
-        if (data.learned && data.learned.rules_updated) {
-          flash(`Claude a mis a jour ${data.learned.rules_updated} regle(s) d'extraction.`);
-        }
-      } catch (error) {
-        cell.classList.add("is-failed");
-        cell.title = error.message;
-        input.value = input.dataset.original;
-      } finally {
-        cell.classList.remove("is-saving");
+      if (data.status === "ok" && onSaved) onSaved(value, invoiceId);
+      if (data.learned && data.learned.rules_updated) {
+        flash(`L'automate a mis a jour ${data.learned.rules_updated} regle(s) d'extraction.`);
       }
-    };
+      // The panel may already show another invoice: leave its fields alone.
+      if (input.dataset.invoice !== invoiceId) return;
+      input.dataset.original = value;
+      if (data.status === "ok") {
+        holder.classList.remove("is-uncertain");
+        holder.classList.add("is-edited");
+        holder.title = "Champ corrige a la main";
+      }
+    } catch (error) {
+      if (input.dataset.invoice !== invoiceId) return;
+      holder.classList.add("is-failed");
+      holder.title = error.message;
+      input.value = input.dataset.original;
+    } finally {
+      if (input.dataset.invoice === invoiceId) holder.classList.remove("is-saving");
+    }
+  }
 
-    input.addEventListener("blur", save);
+  function bindEditing(input, getInvoiceId, holder, onSaved) {
+    input.addEventListener("blur", () => saveField(getInvoiceId(), input, holder, onSaved));
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") { event.preventDefault(); input.blur(); }
-      if (event.key === "Escape") { input.value = input.dataset.original; input.blur(); }
+      if (event.key === "Escape" && input.value !== input.dataset.original) {
+        // Cancel the edit only; a second Escape closes the document viewer.
+        event.stopPropagation();
+        input.value = input.dataset.original;
+      }
     });
+  }
+
+  $$(".cell-input").forEach((input) => {
+    input.dataset.original = input.value;
+    const invoiceId = input.closest("tr").dataset.id;
+    input.dataset.invoice = invoiceId;
+    bindEditing(input, () => invoiceId, input.closest(".cell"));
   });
 
   function flash(message) {
@@ -182,23 +271,133 @@
 
   /* ------------------------------------------------------ document modal */
 
+  // The original is shown next to the extracted fields, which can be corrected
+  // in place: checking a value against the document is why it gets opened.
   const modal = $("#docModal");
   if (modal) {
     const frame = $("#docFrame");
     const title = $("#docTitle");
     const openLink = $("#docOpen");
+    const prevBtn = $("#docPrev");
+    const nextBtn = $("#docNext");
+    const position = $("#docPosition");
+    const errorEl = $("#docError");
+    const notesWrap = $("#docNotesWrap");
+    const notes = $("#docNotes");
+    const inputs = $$(".doc-input", modal);
 
-    $$(".view-doc").forEach((button) => {
-      button.addEventListener("click", () => {
-        const url = `/invoices/${button.dataset.id}/file`;
-        frame.src = url;
-        openLink.href = url;
-        title.textContent = button.dataset.name;
-        modal.hidden = false;
+    // Previous/next walk through the invoices of the table, in its order.
+    const tableIds = $$("#invoiceTable .view-doc").map((button) => button.dataset.id);
+    let currentId = null;
+
+    // Keep the table in step with a correction made in the panel.
+    function syncTable(invoiceId, field, value) {
+      const input = $(`#invoiceTable tr[data-id="${CSS.escape(invoiceId)}"] .cell-input[data-field="${field}"]`);
+      if (!input) return;
+      input.value = value;
+      input.dataset.original = value;
+      input.title = value;
+      const cell = input.closest(".cell");
+      cell.classList.remove("is-uncertain", "is-failed");
+      cell.classList.add("is-edited");
+      cell.title = "Champ corrige a la main";
+    }
+
+    inputs.forEach((input) => {
+      const holder = input.closest(".doc-field");
+      // The id is read when the save starts, so an edit still pending while
+      // the user moves to the next invoice lands on the right one.
+      let savingId = null;
+      input.addEventListener("focus", () => { savingId = currentId; });
+      bindEditing(input, () => savingId || currentId, holder, (value, invoiceId) => {
+        syncTable(invoiceId, input.dataset.field, value);
+        if (invoiceId === currentId) holder.querySelector(".doc-state").textContent = " · corrige";
       });
     });
 
-    const close = () => { modal.hidden = true; frame.src = "about:blank"; };
+    function fillFields(data) {
+      inputs.forEach((input) => {
+        const field = input.dataset.field;
+        const value = data[field] == null ? "" : String(data[field]);
+        const holder = input.closest(".doc-field");
+        input.value = value;
+        input.dataset.original = value;
+        input.dataset.invoice = data.id;
+        input.disabled = false;
+        const uncertain = data.uncertain_fields.indexOf(field) > -1;
+        const edited = data.edited_fields.indexOf(field) > -1;
+        holder.classList.remove("is-saving", "is-failed");
+        holder.classList.toggle("is-uncertain", uncertain);
+        holder.classList.toggle("is-edited", edited);
+        holder.title = "";
+        holder.querySelector(".doc-state").textContent =
+          edited ? " · corrige" : uncertain ? " · a verifier" : "";
+      });
+      errorEl.hidden = !data.error;
+      errorEl.textContent = data.error || "";
+      notesWrap.hidden = !data.extraction_notes;
+      notes.textContent = data.extraction_notes || "";
+    }
+
+    async function show(invoiceId, name) {
+      if (document.activeElement && modal.contains(document.activeElement)) {
+        document.activeElement.blur();  // saves a pending edit first
+      }
+      currentId = invoiceId;
+      const url = `/invoices/${encodeURIComponent(invoiceId)}/file`;
+      frame.src = url;
+      openLink.href = url;
+      title.textContent = name || "";
+      modal.hidden = false;
+
+      const index = tableIds.indexOf(invoiceId);
+      prevBtn.hidden = nextBtn.hidden = index === -1;
+      prevBtn.disabled = index <= 0;
+      nextBtn.disabled = index === -1 || index >= tableIds.length - 1;
+      position.textContent = index > -1 ? `${index + 1} / ${tableIds.length}` : "";
+
+      inputs.forEach((input) => {
+        input.disabled = true;
+        input.value = "";
+        input.dataset.invoice = "";
+        input.closest(".doc-field").classList.remove("is-uncertain", "is-edited", "is-saving", "is-failed");
+      });
+      errorEl.hidden = true;
+      notesWrap.hidden = true;
+      try {
+        const response = await fetch(`/api/invoices/${encodeURIComponent(invoiceId)}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Facture introuvable");
+        if (currentId !== invoiceId) return;  // user already moved on
+        title.textContent = data.filename.split("/").pop();
+        fillFields(data);
+      } catch (error) {
+        errorEl.hidden = false;
+        errorEl.textContent = error.message;
+      }
+    }
+
+    const step = (offset) => {
+      const index = tableIds.indexOf(currentId) + offset;
+      if (index < 0 || index >= tableIds.length) return;
+      const button = $(`#invoiceTable .view-doc[data-id="${CSS.escape(tableIds[index])}"]`);
+      show(tableIds[index], button ? button.dataset.name : "");
+    };
+    prevBtn.addEventListener("click", () => step(-1));
+    nextBtn.addEventListener("click", () => step(1));
+
+    $$(".view-doc").forEach((button) => {
+      button.addEventListener("click", () => show(button.dataset.id, button.dataset.name));
+    });
+
+    const close = () => {
+      if (document.activeElement && modal.contains(document.activeElement)) {
+        document.activeElement.blur();
+      }
+      modal.hidden = true;
+      frame.src = "about:blank";
+      currentId = null;
+    };
     $$("[data-close]", modal).forEach((element) => element.addEventListener("click", close));
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !modal.hidden) close();
@@ -236,13 +435,222 @@
     });
   });
 
+  /* ------------------------------------------------------ import summary */
+
+  const summaryModal = $("#importSummary");
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    // textContent, never innerHTML: file names come from users' archives.
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function plural(count, singular, pluralForm) {
+    return `${count} ${count > 1 ? (pluralForm || singular + "s") : singular}`;
+  }
+
+  function summaryDuration(seconds) {
+    if (seconds == null) return "";
+    const s = Math.max(0, Math.round(seconds));
+    if (s < 60) return `${s} s`;
+    if (s < 3600) return `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} s`;
+    return `${Math.floor(s / 3600)} h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")} min`;
+  }
+
+  const KIND_LABELS = {
+    extraction: "echec de la lecture par l'automate",
+    unsupported: "fichier non exploitable (format, fichier illisible)",
+    quota: "refusee : quota de stockage atteint",
+    other: "autre erreur",
+  };
+
+  function renderSummary(data) {
+    const title = $("#summaryTitle");
+    const meta = $("#summaryMeta");
+    const content = $("#summaryContent");
+    const primary = $("#summaryPrimary");
+
+    title.textContent = data.status === "done"
+      ? "Import termine"
+      : data.status === "interrupted" ? "Import interrompu" : "Import arrete par une erreur";
+    meta.textContent = [
+      plural(data.total, "document") + " dans le lot",
+      data.elapsed_seconds != null ? `duree ${summaryDuration(data.elapsed_seconds)}` : "",
+      data.label || "",
+    ].filter(Boolean).join(" · ");
+
+    content.innerHTML = "";
+
+    // One bar, one segment per outcome: the proportions read at a glance, the
+    // rows below carry the exact numbers (colour is never the only cue).
+    const outcomes = [
+      { key: "succeeded", label: "Integrees avec succes", value: data.succeeded, tone: "good" },
+      { key: "duplicates", label: "Doublons ignores (non integres)", value: data.duplicates, tone: "neutral" },
+      { key: "failed", label: "Non integrees : erreur", value: data.failed, tone: "critical" },
+      { key: "not_processed", label: "Non traitees (import interrompu)", value: data.not_processed, tone: "muted" },
+    ];
+
+    if (data.total > 0) {
+      const bar = el("div", "summary-bar");
+      bar.setAttribute("role", "img");
+      bar.setAttribute("aria-label", outcomes.filter((o) => o.value).map((o) => `${o.label} : ${o.value}`).join(", "));
+      outcomes.filter((o) => o.value > 0).forEach((o) => {
+        const segment = el("span", `summary-seg tone-${o.tone}`);
+        segment.style.flexGrow = String(o.value);
+        bar.appendChild(segment);
+      });
+      content.appendChild(bar);
+    }
+
+    const list = el("ul", "summary-list");
+    outcomes.forEach((o) => {
+      if (o.key === "not_processed" && !o.value) return;
+      const row = el("li", "summary-row" + (o.value ? "" : " is-zero"));
+      const label = el("span", "summary-label");
+      label.appendChild(el("span", `summary-swatch tone-${o.tone}`));
+      label.appendChild(el("span", null, o.label));
+      row.appendChild(label);
+      row.appendChild(el("span", "summary-count", String(o.value)));
+      list.appendChild(row);
+
+      if (o.key === "succeeded" && data.needs_review) {
+        const sub = el("li", "summary-sub");
+        sub.appendChild(el("span", null, `dont ${plural(data.needs_review, "facture")} avec des champs a verifier `));
+        const link = el("a", null, "Voir");
+        link.href = `/invoices?batch=${encodeURIComponent(data.batch_id)}&status=uncertain`;
+        link.dataset.summaryLink = "";
+        sub.appendChild(link);
+        list.appendChild(sub);
+      }
+      if (o.key === "failed" && data.failed) {
+        Object.keys(KIND_LABELS).forEach((kind) => {
+          const count = data.failed_by_kind[kind];
+          if (count) list.appendChild(el("li", "summary-sub", `${count} · ${KIND_LABELS[kind]}`));
+        });
+      }
+    });
+    content.appendChild(list);
+
+    if (data.failures.length) {
+      const section = el("section", "summary-section");
+      const heading = el("h3", "summary-h3", "Factures non integrees");
+      section.appendChild(heading);
+      const items = el("ul", "summary-files");
+      data.failures.forEach((failure) => {
+        const item = el("li");
+        item.appendChild(el("span", "summary-file", failure.filename.split("/").pop()));
+        item.appendChild(el("span", "summary-reason", failure.error));
+        items.appendChild(item);
+      });
+      section.appendChild(items);
+      const link = el("a", "summary-more",
+        data.failed > data.failures.length ? `Voir les ${data.failed} factures en erreur` : "Voir dans le tableau");
+      link.href = `/invoices?batch=${encodeURIComponent(data.batch_id)}&status=errors`;
+      link.dataset.summaryLink = "";
+      section.appendChild(link);
+      content.appendChild(section);
+    }
+
+    if (data.duplicate_examples.length) {
+      const section = el("section", "summary-section");
+      section.appendChild(el("h3", "summary-h3", "Doublons ignores"));
+      section.appendChild(el("p", "summary-note",
+        "Documents identiques, au bit pres, a une facture deja presente : ni stockes, ni envoyes a l'extraction, ni comptes dans les totaux."));
+      const items = el("ul", "summary-files");
+      data.duplicate_examples.forEach((dup) => {
+        const item = el("li");
+        item.appendChild(el("span", "summary-file", dup.filename.split("/").pop()));
+        item.appendChild(el("span", "summary-reason",
+          dup.original_filename ? `identique a ${dup.original_filename.split("/").pop()}` : "facture d'origine depuis supprimee"));
+        items.appendChild(item);
+      });
+      section.appendChild(items);
+      if (data.duplicates > data.duplicate_examples.length) {
+        const more = el("a", "summary-more", `Voir les ${data.duplicates} doublons`);
+        more.href = "/invoices#doublons";
+        more.dataset.summaryLink = "";
+        section.appendChild(more);
+      }
+      content.appendChild(section);
+    }
+
+    if (data.status === "interrupted" && data.not_processed) {
+      content.appendChild(el("p", "summary-alert",
+        `${plural(data.not_processed, "document")} n'ont pas ete traites. Redepose les memes fichiers : ` +
+        "les factures deja integrees seront reconnues comme doublons et seul le reste sera traite."));
+    }
+
+    primary.href = `/invoices?batch=${encodeURIComponent(data.batch_id)}`;
+    primary.hidden = !(data.succeeded || data.failed);
+  }
+
+  async function acknowledge(batchId) {
+    try {
+      await fetch(`/api/batches/${encodeURIComponent(batchId)}/ack`, { method: "POST", keepalive: true });
+    } catch (error) { /* the summary will simply be offered again next time */ }
+  }
+
+  async function showImportSummary(batchId) {
+    if (!summaryModal || !batchId) return;
+    let data;
+    try {
+      const response = await fetch(`/api/batches/${encodeURIComponent(batchId)}/summary`);
+      if (!response.ok) return;
+      data = await response.json();
+    } catch (error) {
+      return;
+    }
+
+    renderSummary(data);
+    summaryModal.hidden = false;
+    const closeButton = $("[data-summary-close].btn", summaryModal);
+    if (closeButton) closeButton.focus();
+
+    const close = async () => {
+      if (summaryModal.hidden) return;
+      summaryModal.hidden = true;
+      document.removeEventListener("keydown", onKey);
+      await acknowledge(batchId);
+      // New rows only appear in the table after a reload.
+      if (document.body.dataset.activeTab === "invoices") window.location.reload();
+    };
+    const onKey = (event) => { if (event.key === "Escape") close(); };
+
+    $$("[data-summary-close]", summaryModal).forEach((node) => { node.onclick = close; });
+    document.addEventListener("keydown", onKey);
+    // Following a link from the summary also counts as having seen it.
+    $$("[data-summary-link], #summaryPrimary", summaryModal).forEach((link) => {
+      link.onclick = () => { acknowledge(batchId); };
+    });
+  }
+
+  // An import that finished while the user was elsewhere (another tab, page
+  // closed): its summary is waiting for them on the next page they open.
+  if (document.body.dataset.pendingSummary && !$("#runningBatch")) {
+    showImportSummary(document.body.dataset.pendingSummary);
+  }
+
+  // The duplicates panel can be linked to directly from the summary.
+  if (window.location.hash === "#doublons") {
+    const panel = $("#doublons");
+    if (panel) { panel.open = true; panel.scrollIntoView({ block: "start" }); }
+  }
+
   /* ------------------------------------------------------ chart tooltips */
 
   const tooltip = $("#chartTooltip");
   if (tooltip) {
     $$(".bar-group").forEach((group) => {
       group.addEventListener("mousemove", (event) => {
-        tooltip.innerHTML = `<b>${group.dataset.label}</b>${group.dataset.value}`;
+        // Never innerHTML here: the label is a supplier name read off a
+        // document, i.e. text an outsider controls by sending an invoice.
+        tooltip.textContent = "";
+        const strong = document.createElement("b");
+        strong.textContent = group.dataset.label;
+        tooltip.appendChild(strong);
+        tooltip.appendChild(document.createTextNode(group.dataset.value));
         tooltip.hidden = false;
         const box = tooltip.getBoundingClientRect();
         const x = Math.min(event.clientX + 14, window.innerWidth - box.width - 10);

@@ -85,6 +85,37 @@ the work in a background thread; the browser polls `/api/batches/{id}`. Inside, 
 and `_running_imports` prevents a second concurrent batch per tenant (which would multiply
 effective concurrency).
 
+Measured on 24 real invoices (8 workers): ~10 s per invoice for one worker, of which ~71% is
+the Claude call and ~14% PDF rendering; 1.58 s per invoice of wall time in a batch, i.e.
+~31 min for the 1181-invoice reference set. Eight fully independent workers would give
+1.25 s — the gap is contention, mostly concurrent SQLite writes (an insert is 0.06 s median
+but up to 3 s under load).
+
+**Remaining-time estimate.** `pipeline.estimate_remaining` feeds the countdown shown during
+an import (via `/api/batches/{id}`, fields `eta_seconds`, `eta_basis`, `elapsed_seconds`).
+Until one full round of workers has finished it uses the measured prior
+(`ESTIMATED_SECONDS_PER_INVOICE` × `BATCH_CONTENTION`, per round of workers); after that it
+follows observed wall time per extraction. Only documents that actually went through
+extraction are timed (`_BatchState.record_extraction`): duplicates take milliseconds and
+would make the estimate absurdly optimistic, so the duplicate share seen so far is applied to
+the remaining documents instead. The live state lives in `_active_batches` and is registered
+in `start_import` *before* the thread starts — otherwise an immediate poll would find no
+state and wrongly declare the batch orphaned. A batch the database marks `running` but that
+this process is not running (server restarted mid-import) is marked `interrupted` by
+`app._reconcile_batch`; re-uploading resumes it, since deduplication skips what was done.
+
+**Import summary pop-up.** When a batch ends, `app.js` fetches `/api/batches/{id}/summary`
+(409 while still running) and shows the modal defined in `base.html`. `db.batch_summary`
+counts from the rows the batch actually wrote (`invoices` + `duplicates`), not from the
+`batches` counters, and derives `not_processed` from the difference with `total` — that is
+what an interrupted batch reports. Failures are grouped by `db.error_kind`, which matches
+the opening words of the error messages written in `extraction.py` / `pipeline.py`: **a new
+error message needs its prefix added to `ERROR_KINDS`**, or it lands in "other". The summary
+must survive the user leaving the page mid-import, so it is re-offered on page load
+(`pending_summary_batch`, scoped to `started_by`) until closed (`/ack` sets
+`acknowledged_at`); the migration marks pre-existing batches acknowledged so they don't pop
+up after an upgrade. Links in the summary use the `batch` filter of `/invoices`.
+
 `InvoiceSource` holds archive bytes lazily: members are read only when a worker picks them
 up, so a 300 MB archive is never fully decompressed in memory. The shared `archive_bytes` is
 immutable and each read wraps it in a fresh `ZipFile`, because zipfile handles are not
@@ -194,6 +225,47 @@ variant to keep in sync.
 breakdown and the template warns when more than one is present — do not add a total that
 silently mixes currencies. The extraction prompt normalises currencies to ISO 4217 codes
 specifically so this stays rare.
+
+### UI conventions (product decisions)
+
+- User-facing text never names the model: say **"l'automate"**, not "Claude" (code, comments
+  and this file may).
+- All buttons share one colour; `.btn-primary` only makes the label heavier. Blue is kept
+  for links and focus, not button fills.
+- The document viewer (`#docModal`) shows the original beside its editable fields, because
+  opening a document is mostly done to check what was extracted. It loads fields from
+  `GET /api/invoices/{id}` and saves through the same `saveField` path as the table cells
+  (so corrections still feed the learning loop), then syncs the table row. Saves are tied to
+  the invoice id captured when the field was focused: moving to the next invoice while an
+  edit is pending must not write it onto the new one.
+
+### Security invariants
+
+Checked by the security suite; breaking one of these is a vulnerability, not a regression.
+
+- **Never render user-controlled text as HTML.** Supplier names and extraction notes come
+  off documents an outsider can send, so `innerHTML` with them is stored XSS. Build nodes and
+  set `textContent` (the chart tooltip and the summary pop-up do). The CSP
+  (`script-src 'self'`, no inline) is the second line of defence — keep scripts external.
+- **Stored file names are derived from the invoice id, never from the upload.** A filename
+  (upload or archive member) is attacker-controlled and its "extension" can carry
+  `../`; `_store_original` accepts only `^\.[a-z0-9]{1,8}$` and verifies containment.
+  `/invoices/{id}/file` re-verifies containment and serves only `VIEWABLE_TYPES` inline —
+  an HTML/SVG "invoice" must never come back as `text/html` on this origin.
+- **Session = tenant + account.** `current_user` refuses a cookie whose tenant is not the
+  host's *and* one whose account no longer exists; `/login` clears the session before
+  setting it, and `auth` locks an email+IP after `FAILURES_BEFORE_LOCK` failures.
+- **Cookies are `Secure` as soon as `APP_DOMAIN` is set** (`SESSION_HTTPS_ONLY` overrides).
+  `same_site="lax"` is what stands in for CSRF tokens — do not widen it to "none".
+- **Uploads are capped** (`MAX_UPLOAD_MB`): the request body is held in memory while it is
+  expanded, so an uncapped upload is a denial of service for every tenant on the box.
+
+### Static assets & browser cache
+
+`StaticFiles` sends no `Cache-Control`, so browsers cache `app.js`/`app.css` heuristically
+and kept running the old script after an update (the import summary never appeared). Always
+reference assets through the `static_url('app.js')` template global, which appends the
+file's mtime as `?v=` — never a bare `/static/...` URL.
 
 ### CSS trap
 

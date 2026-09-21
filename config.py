@@ -26,6 +26,12 @@ LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
 MAX_CONCURRENT_EXTRACTIONS = int(os.environ.get("MAX_CONCURRENT_EXTRACTIONS", "8"))
 
+# Time one worker spends on one invoice (store, render pages, Claude call, insert).
+# Measured median on the reference dataset: ~10 s, of which ~7 s is the Claude
+# call. Only used for the remaining-time estimate before the first invoices of a
+# batch complete; after that the estimate follows the observed throughput.
+ESTIMATED_SECONDS_PER_INVOICE = float(os.environ.get("ESTIMATED_SECONDS_PER_INVOICE", "10"))
+
 # Number of pending corrections on a supplier before its extraction rules are
 # refreshed automatically (see learning.py).
 AUTO_LEARN_THRESHOLD = int(os.environ.get("AUTO_LEARN_THRESHOLD", "3"))
@@ -34,8 +40,18 @@ AUTO_LEARN_THRESHOLD = int(os.environ.get("AUTO_LEARN_THRESHOLD", "3"))
 # (set per client with `manage.py set-quota`). 0 means unlimited.
 DEFAULT_STORAGE_QUOTA_MB = int(os.environ.get("DEFAULT_STORAGE_QUOTA_MB", "0"))
 
+# Largest single upload accepted, in MB. The request is read into memory before
+# it is expanded, so this is also the cap on what one user can make the server
+# hold at once. 0 disables the check.
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "500"))
+
 SESSION_COOKIE = "invoice_session"
 SESSION_MAX_AGE = 60 * 60 * 12  # 12 hours
+
+# Session cookies must be HTTPS-only in production. Defaults to on as soon as
+# APP_DOMAIN is set (i.e. not a local run); SESSION_HTTPS_ONLY overrides it.
+_https_only = os.environ.get("SESSION_HTTPS_ONLY")
+SESSION_HTTPS_ONLY = bool(APP_DOMAIN) if _https_only is None else _https_only.lower() in ("1", "true", "yes")
 
 
 def session_secret() -> str:

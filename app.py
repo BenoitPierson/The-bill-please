@@ -36,7 +36,9 @@ from config import (
     AUTO_LEARN_THRESHOLD,
     BASE_DIR,
     DEFAULT_TENANT,
+    MAX_UPLOAD_MB,
     SESSION_COOKIE,
+    SESSION_HTTPS_ONLY,
     SESSION_MAX_AGE,
     session_secret,
 )
@@ -52,15 +54,62 @@ app.add_middleware(
     secret_key=session_secret(),
     session_cookie=SESSION_COOKIE,
     max_age=SESSION_MAX_AGE,
+    # "lax" keeps the cookie off cross-site POST/PATCH/DELETE, which is what
+    # stands in for CSRF tokens here; the API is only reachable same-origin.
     same_site="lax",
-    https_only=False,  # set True behind HTTPS in production
+    https_only=SESSION_HTTPS_ONLY,
 )
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Baseline hardening for every response.
+
+    The CSP is the real one: it forbids inline and third-party scripts, so a
+    value that slipped through escaping somewhere cannot execute. Client
+    documents are shown in an iframe from this same origin, hence 'self' for
+    frame-src, and nothing may frame the application itself.
+    """
+    response = await call_next(request)
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        # 'unsafe-inline' applies to styles only, for the style="" attributes
+        # that carry chart geometry; scripts stay strictly external.
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "object-src 'self'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+        "form-action 'self'",
+    )
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    # Client invoices must never be cached by a proxy on the way.
+    if request.url.path.startswith(("/invoices", "/api", "/dashboard")):
+        response.headers.setdefault("Cache-Control", "no-store, private")
+    return response
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 templates.env.filters["amount"] = charts.format_amount
 templates.env.filters["compact"] = charts.format_compact
 templates.env.filters["filesize"] = charts.format_bytes
+
+
+def static_url(name: str) -> str:
+    """Static asset URL carrying the file's modification time.
+
+    StaticFiles sends no Cache-Control, so browsers cache app.js/app.css
+    heuristically and keep running the old version after an update. A changed
+    file gets a new URL, which the browser has to fetch.
+    """
+    try:
+        version = int((BASE_DIR / "static" / name).stat().st_mtime)
+    except OSError:
+        version = 0
+    return "/static/{}?v={}".format(name, version)
+
+
+templates.env.globals["static_url"] = static_url
 
 _client: Optional[Anthropic] = None
 
@@ -93,7 +142,12 @@ def current_user(request: Request, slug: str) -> Optional[str]:
     # never be replayed against another client's workspace.
     if session.get("tenant") != slug:
         return None
-    return session.get("email")
+    email = session.get("email")
+    # And the account must still exist: a cookie stays valid for 12 h, which
+    # would otherwise outlive a user whose access has just been removed.
+    if not email or db.get_user(slug, email) is None:
+        return None
+    return email
 
 
 def _filters_from(request: Request) -> Dict[str, Any]:
@@ -104,10 +158,14 @@ def _filters_from(request: Request) -> Dict[str, Any]:
         "date_to": params.get("date_to", ""),
         "search": params.get("search", ""),
         "status": params.get("status", ""),
+        "batch": params.get("batch", ""),
     }
 
 
 def _page_context(request: Request, slug: str, email: str, active: str) -> Dict[str, Any]:
+    # Close out imports orphaned by a restart first, so their summary is
+    # offered like any other finished import.
+    _running_batches(slug)
     return {
         "request": request,
         "tenant": slug,
@@ -118,6 +176,7 @@ def _page_context(request: Request, slug: str, email: str, active: str) -> Dict[
         "suppliers": db.distinct_suppliers(slug),
         "pending_corrections": db.count_pending_corrections(slug),
         "importing": pipeline.is_importing(slug),
+        "pending_summary": db.pending_summary_batch(slug, email),
     }
 
 
@@ -200,22 +259,47 @@ def login_submit(
     if slug is None:
         return _unknown_tenant(request)
 
-    identity = auth.authenticate(slug, email, password)
-    if identity is None:
-        logger.info("[%s] echec de connexion pour %r", slug, email)
-        return templates.TemplateResponse(
-            "login.html",
-            {
-                "request": request,
-                "tenant": slug,
-                "tenant_name": tenants.display_name(slug),
-                "error": "Identifiants incorrects.",
-            },
-            status_code=401,
+    throttle_key = "{}|{}|{}".format(slug, (email or "").strip().lower(), _client_ip(request))
+    waiting = auth.locked_seconds(throttle_key)
+    if waiting:
+        return _login_error(
+            request,
+            slug,
+            "Trop de tentatives. Reessaie dans {} minute(s).".format(max(1, waiting // 60)),
+            status_code=429,
         )
 
+    identity = auth.authenticate(slug, email, password)
+    if identity is None:
+        auth.record_failure(throttle_key)
+        logger.info("[%s] echec de connexion depuis %s", slug, _client_ip(request))
+        return _login_error(request, slug, "Identifiants incorrects.", status_code=401)
+
+    auth.clear_failures(throttle_key)
+    # A fresh session id on privilege change, so a cookie fixed by an attacker
+    # before login cannot be reused afterwards.
+    request.session.clear()
     request.session.update({"tenant": slug, "email": identity})
     return RedirectResponse("/dashboard", status_code=303)
+
+
+def _client_ip(request: Request) -> str:
+    # X-Forwarded-For is only trustworthy behind a proxy that sets it; uvicorn
+    # must run with --proxy-headers for request.client to already be the real one.
+    return request.client.host if request.client else "?"
+
+
+def _login_error(request: Request, slug: str, message: str, status_code: int) -> Response:
+    return templates.TemplateResponse(
+        "login.html",
+        {
+            "request": request,
+            "tenant": slug,
+            "tenant_name": tenants.display_name(slug),
+            "error": message,
+        },
+        status_code=status_code,
+    )
 
 
 @app.post("/logout")
@@ -296,13 +380,40 @@ def invoices(request: Request) -> Response:
             "page_count": max(1, (total + per_page - 1) // per_page),
             "editable_fields": list(db.EDITABLE_FIELDS),
             "rules": [dict(r) for r in db.list_rules(slug)],
-            "batches": [dict(b) for b in db.active_batches(slug)],
+            "batches": _running_batches(slug),
             "storage": _storage_view(slug),
             "duplicates": [dict(d) for d in db.list_duplicates(slug)],
             "duplicate_summary": db.duplicate_summary(slug),
         }
     )
     return templates.TemplateResponse("invoices.html", context)
+
+
+def _reconcile_batch(slug: str, batch: Dict[str, Any]) -> Dict[str, Any]:
+    """Close a batch the database says is running but no thread is processing.
+
+    Background imports live in the server process: a restart mid-import leaves
+    the batch 'running' forever, with a progress bar and a countdown that never
+    move. Detected here and marked interrupted instead.
+    """
+    if batch["status"] == "running" and pipeline.batch_progress(batch["id"], batch) is None:
+        db.finish_batch(slug, batch["id"], "interrupted")
+        batch = dict(db.get_batch(slug, batch["id"]))
+    return batch
+
+
+def _running_batches(slug: str) -> List[Dict[str, Any]]:
+    batches = [_reconcile_batch(slug, dict(b)) for b in db.active_batches(slug)]
+    return [b for b in batches if b["status"] == "running"]
+
+
+def _duration_seconds(batch: Dict[str, Any]) -> Optional[int]:
+    try:
+        started = datetime.fromisoformat(batch["started_at"])
+        finished = datetime.fromisoformat(batch["finished_at"])
+    except (TypeError, ValueError):
+        return None
+    return max(0, int((finished - started).total_seconds()))
 
 
 def _storage_view(slug: str) -> Dict[str, Any]:
@@ -340,11 +451,23 @@ async def api_import(request: Request, files: List[UploadFile] = File(...)) -> R
             {"error": "ANTHROPIC_API_KEY n'est pas configuree sur le serveur."}, status_code=400
         )
 
+    # The whole upload is held in memory while it is expanded, so its size is
+    # capped: without this one request can exhaust the server for every client.
+    limit = MAX_UPLOAD_MB * 1024 * 1024
     uploads = []
+    total_bytes = 0
     for upload in files:
-        uploads.append((upload.filename or "sans_nom", await upload.read(), upload.content_type))
+        content = await upload.read()
+        total_bytes += len(content)
+        if limit and total_bytes > limit:
+            return JSONResponse(
+                {"error": "Import trop volumineux (maximum {} Mo par envoi). "
+                          "Depose les archives une par une.".format(MAX_UPLOAD_MB)},
+                status_code=413,
+            )
+        uploads.append((upload.filename or "sans_nom", content, upload.content_type))
 
-    outcome = pipeline.start_import(get_client(), slug, uploads)
+    outcome = pipeline.start_import(get_client(), slug, uploads, started_by=email)
     if "error" in outcome:
         return JSONResponse(outcome, status_code=409)
     return JSONResponse(outcome)
@@ -356,10 +479,47 @@ def api_batch(request: Request, batch_id: str) -> Response:
     if redirect is not None:
         return JSONResponse({"error": "Session expiree."}, status_code=401)
 
-    batch = db.get_batch(slug, batch_id)
-    if batch is None:
+    row = db.get_batch(slug, batch_id)
+    if row is None:
         return JSONResponse({"error": "Lot introuvable."}, status_code=404)
-    return JSONResponse(dict(batch))
+
+    batch = _reconcile_batch(slug, dict(row))
+    progress = pipeline.batch_progress(batch_id, batch) if batch["status"] == "running" else None
+    if progress is not None:
+        batch.update(progress)
+    else:
+        batch["elapsed_seconds"] = _duration_seconds(batch)
+        batch["eta_seconds"] = 0
+        batch["eta_basis"] = "termine"
+    return JSONResponse(batch)
+
+
+@app.get("/api/batches/{batch_id}/summary")
+def api_batch_summary(request: Request, batch_id: str) -> Response:
+    slug, email, redirect = _require_login(request)
+    if redirect is not None:
+        return JSONResponse({"error": "Session expiree."}, status_code=401)
+
+    row = db.get_batch(slug, batch_id)
+    if row is None:
+        return JSONResponse({"error": "Lot introuvable."}, status_code=404)
+    batch = _reconcile_batch(slug, dict(row))
+    if batch["status"] == "running":
+        return JSONResponse({"error": "Import encore en cours."}, status_code=409)
+
+    summary = db.batch_summary(slug, batch_id)
+    summary["elapsed_seconds"] = _duration_seconds(batch)
+    return JSONResponse(summary)
+
+
+@app.post("/api/batches/{batch_id}/ack")
+def api_batch_ack(request: Request, batch_id: str) -> Response:
+    """The user closed the import summary: don't offer it again."""
+    slug, email, redirect = _require_login(request)
+    if redirect is not None:
+        return JSONResponse({"error": "Session expiree."}, status_code=401)
+    db.acknowledge_batch(slug, batch_id)
+    return JSONResponse({"status": "ok"})
 
 
 # ------------------------------------------------------------------------- editing
@@ -377,6 +537,33 @@ def _coerce(field: str, raw: Any) -> Any:
         except ValueError:
             raise ValueError("Montant invalide : {!r}".format(raw))
     return value
+
+
+@app.get("/api/invoices/{invoice_id}")
+def api_get_invoice(request: Request, invoice_id: str) -> Response:
+    """One invoice's extracted fields, for the review panel beside the document."""
+    slug, email, redirect = _require_login(request)
+    if redirect is not None:
+        return JSONResponse({"error": "Session expiree."}, status_code=401)
+
+    invoice = db.get_invoice(slug, invoice_id)
+    if invoice is None:
+        return JSONResponse({"error": "Facture introuvable."}, status_code=404)
+
+    payload = {field: invoice[field] for field in db.EDITABLE_FIELDS}
+    payload.update(
+        {
+            "id": invoice["id"],
+            "filename": invoice["filename"],
+            "archive": invoice["archive"],
+            "has_file": bool(invoice["stored_name"]),
+            "error": invoice["error"],
+            "extraction_notes": invoice["extraction_notes"],
+            "uncertain_fields": json.loads(invoice["uncertain_fields"] or "[]"),
+            "edited_fields": json.loads(invoice["edited_fields"] or "[]"),
+        }
+    )
+    return JSONResponse(payload)
 
 
 @app.patch("/api/invoices/{invoice_id}")
@@ -455,6 +642,16 @@ def api_delete_rule(request: Request, rule_id: int) -> Response:
 # ------------------------------------------------------------------ original files
 
 
+# Extensions shown inline in the viewer, with the type they are served as.
+VIEWABLE_TYPES = {
+    ".pdf": "application/pdf",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+
+
 @app.get("/invoices/{invoice_id}/file")
 def invoice_file(request: Request, invoice_id: str) -> Response:
     slug, email, redirect = _require_login(request)
@@ -472,10 +669,20 @@ def invoice_file(request: Request, invoice_id: str) -> Response:
     if directory not in path.parents or not path.exists():
         return JSONResponse({"error": "Document original indisponible."}, status_code=404)
 
+    # The stored content type comes from the upload, so it is user-controlled:
+    # serving an HTML or SVG "invoice" inline would run its script on this
+    # origin. Only the formats the extractor accepts are shown inline; anything
+    # else is handed over as a download of unknown type.
+    media_type = VIEWABLE_TYPES.get(path.suffix.lower())
+    disposition = "inline" if media_type else "attachment"
     return FileResponse(
         str(path),
-        media_type=invoice["content_type"] or "application/octet-stream",
-        headers={"Content-Disposition": 'inline; filename="{}"'.format(path.name)},
+        media_type=media_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": '{}; filename="{}"'.format(disposition, path.name),
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-store, private",
+        },
     )
 
 

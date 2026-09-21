@@ -6,10 +6,16 @@
   <div>
     <h1>Invoices</h1>
     <p class="page-sub">{{ total }} facture{{ 's' if total > 1 else '' }}
-      {% if filters.supplier or filters.date_from or filters.date_to or filters.search or filters.status %}
+      {% if filters.supplier or filters.date_from or filters.date_to or filters.search or filters.status or filters.batch %}
         <span class="muted">(filtre actif)</span>
       {% endif %}
     </p>
+    {% if filters.batch %}
+    <p class="filter-chip">
+      Factures d'un import precis
+      <a href="/invoices{% if filters.status %}?status={{ filters.status }}{% endif %}">Retirer ce filtre</a>
+    </p>
+    {% endif %}
   </div>
   <div class="page-actions">
     <div class="storage {% if storage.level %}storage-{{ storage.level }}{% endif %}"
@@ -42,6 +48,7 @@
     <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
     <span id="progressText" class="muted"></span>
   </div>
+  <p id="etaText" class="eta" hidden aria-live="polite"></p>
 </section>
 
 {% if batches %}
@@ -53,6 +60,7 @@
 
 <!-- Filters ----------------------------------------------------------------->
 <form class="card filters" method="get" action="/invoices">
+  {% if filters.batch %}<input type="hidden" name="batch" value="{{ filters.batch }}">{% endif %}
   <label class="field">
     <span>Fournisseur</span>
     <select name="supplier">
@@ -92,14 +100,14 @@
 <!-- Learned rules ----------------------------------------------------------->
 <details class="card rules-card" {% if pending_corrections %}open{% endif %}>
   <summary>
-    Ce que Claude a appris de vos corrections
+    Ce que l'automate a appris de vos corrections
     <span class="badge">{{ rules|length }} regle{{ 's' if rules|length > 1 else '' }}</span>
     {% if pending_corrections %}
     <span class="badge badge-warn">{{ pending_corrections }} correction{{ 's' if pending_corrections > 1 else '' }} en attente</span>
     {% endif %}
   </summary>
   <p class="hint">
-    Chaque correction manuelle est enregistree. Claude en deduit des consignes courtes,
+    Chaque correction manuelle est enregistree. L'automate en deduit des consignes courtes,
     appliquees automatiquement aux prochains imports.
   </p>
   <ul class="rules-list" id="rulesList">
@@ -119,7 +127,7 @@
 
 <!-- Duplicates ------------------------------------------------------------->
 {% if duplicate_summary.count %}
-<details class="card rules-card">
+<details class="card rules-card" id="doublons">
   <summary>
     Doublons ignores a l'import
     <span class="badge">{{ duplicate_summary.count }}</span>
@@ -243,15 +251,43 @@
 <!-- Document viewer --------------------------------------------------------->
 <div class="modal" id="docModal" hidden>
   <div class="modal-backdrop" data-close></div>
-  <div class="modal-body">
+  <div class="modal-body doc-body" role="dialog" aria-modal="true" aria-labelledby="docTitle">
     <header class="modal-head">
-      <span id="docTitle"></span>
-      <div>
+      <span id="docTitle" class="doc-title"></span>
+      <div class="doc-head-actions">
+        <button class="btn btn-ghost btn-sm" id="docPrev" title="Facture precedente du tableau">&larr; Precedente</button>
+        <span id="docPosition" class="muted small"></span>
+        <button class="btn btn-ghost btn-sm" id="docNext" title="Facture suivante du tableau">Suivante &rarr;</button>
         <a id="docOpen" class="btn btn-ghost btn-sm" target="_blank" rel="noopener">Ouvrir dans un onglet</a>
         <button class="btn btn-ghost btn-sm" data-close>Fermer</button>
       </div>
     </header>
-    <iframe id="docFrame" title="Facture originale"></iframe>
+    <div class="doc-layout">
+      <iframe id="docFrame" title="Facture originale"></iframe>
+      <aside class="doc-fields" aria-label="Champs extraits">
+        <p class="doc-intro">
+          Compare avec le document et corrige si besoin : chaque modification est
+          enregistree des que tu quittes le champ.
+        </p>
+        <p id="docError" class="tag tag-error" hidden></p>
+        {% for fieldname, label, numeric in [('supplier_name', 'Fournisseur', false), ('invoice_number', 'Numero de facture', false), ('invoice_date', 'Date', false), ('total_amount', 'Montant total', true), ('currency', 'Devise', false), ('vat_amount', 'TVA', true)] %}
+        <label class="doc-field {% if numeric %}num{% endif %}" data-field="{{ fieldname }}">
+          <span class="doc-label">{{ label }}<span class="doc-state"></span></span>
+          <input class="doc-input" data-field="{{ fieldname }}"
+                 type="{{ 'date' if fieldname == 'invoice_date' else 'text' }}"
+                 {% if numeric %}inputmode="decimal"{% endif %} autocomplete="off">
+        </label>
+        {% endfor %}
+        <div id="docNotesWrap" class="doc-notes" hidden>
+          <span class="doc-label">Remarques de l'automate</span>
+          <p id="docNotes"></p>
+        </div>
+        <p class="legend doc-legend">
+          <span class="swatch swatch-uncertain"></span> a verifier
+          <span class="swatch swatch-edited"></span> corrige a la main
+        </p>
+      </aside>
+    </div>
   </div>
 </div>
 {% endblock %}

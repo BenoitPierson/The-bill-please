@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{% block title %}Factures{% endblock %} — {{ tenant_name }}</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="{{ static_url('app.css') }}">
 </head>
-<body>
+<body data-pending-summary="{{ pending_summary or '' }}" data-active-tab="{{ active_tab }}">
 <header class="topbar">
   <div class="topbar-inner">
     <div class="brand">
@@ -28,7 +28,26 @@
 {% block content %}{% endblock %}
 </main>
 
-<script src="/static/app.js"></script>
+<!-- Import summary: filled by app.js when an import finishes -->
+<div class="modal" id="importSummary" hidden>
+  <div class="modal-backdrop" data-summary-close></div>
+  <div class="modal-body summary-body" role="dialog" aria-modal="true" aria-labelledby="summaryTitle">
+    <header class="summary-head">
+      <div>
+        <h2 id="summaryTitle" class="summary-title">Bilan de l'import</h2>
+        <p id="summaryMeta" class="summary-meta"></p>
+      </div>
+      <button class="btn btn-ghost btn-sm" data-summary-close aria-label="Fermer le bilan">Fermer</button>
+    </header>
+    <div id="summaryContent" class="summary-content"></div>
+    <footer class="summary-foot">
+      <a id="summaryPrimary" class="btn btn-primary" href="/invoices">Voir les factures importées</a>
+      <button class="btn" data-summary-close>Fermer</button>
+    </footer>
+  </div>
+</div>
+
+<script src="{{ static_url('app.js') }}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>
