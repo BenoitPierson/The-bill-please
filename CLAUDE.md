@@ -296,8 +296,15 @@ runtime*. FastAPI/Pydantic **does** evaluate route handler signatures at import 
 subscriptable` — use `typing.List[X]` / `typing.Optional[X]` there. Plain dataclasses and
 non-route functions are unaffected.
 
-`Lancer.bat` prepends Anaconda's DLL directories to `PATH`; without them `_ssl` and `_sqlite3`
-fail to load when launched from Explorer. It also frees port 8000 from a stale instance
+`Installer.bat` sets a new machine up (find a real Python — `where python` alone would match
+the Microsoft Store stub, so each candidate is executed to prove it works — create `.venv`,
+install `requirements.txt`, create `.env` from the example). `Mettre a jour.bat` pulls and
+reinstalls if needed. `Lancer.bat` refuses to start without `.venv`/`.env` and points at the
+installer, so a non-technical user is never left with a window that closes instantly.
+
+`Lancer.bat` prepends Anaconda's DLL directories to `PATH` **when that folder exists**;
+without them `_ssl` and `_sqlite3` fail to load when launched from Explorer on this machine,
+but a poste installed from python.org has no such folder and must not get those entries. It also frees port 8000 from a stale instance
 (error 10048) and waits for the server to answer before opening the browser
 (`open_browser.bat`, using `curl` rather than PowerShell to avoid execution-policy issues).
 Uvicorn auto-reload stays **off**: it watches `.venv` and hangs startup on Windows.

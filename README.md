@@ -8,6 +8,20 @@ consultable, corrigeable et exportable en Excel.
 Chaque entreprise cliente dispose de son propre espace : sa propre URL, ses propres comptes,
 sa propre base de données et ses propres fichiers. Aucune donnée n'est partagée entre clients.
 
+## Installation sur un nouveau poste
+
+1. Récupérer le dossier du projet (GitHub Desktop → *Clone repository*, ou `git clone`).
+2. Double-cliquer sur **`Installer.bat`** : il repère Python, crée l'environnement `.venv`,
+   installe les librairies et ouvre le fichier `.env` pour y coller la clé Anthropic.
+   Si Python manque, il indique quoi installer et s'arrête proprement.
+3. Double-cliquer sur **`Lancer.bat`**.
+
+**`Mettre a jour.bat`** récupère la dernière version publiée (`git pull`) et réinstalle au
+besoin les librairies. Il utilise le git du système, sinon celui livré avec GitHub Desktop.
+
+Un guide pas à pas destiné à un utilisateur non technique, captures à l'appui, est dans
+[docs/Guide d'installation - The Bill Please.pdf](<docs/Guide d'installation - The Bill Please.pdf>).
+
 ## Démarrage rapide (poste local)
 
 Double-clique sur le raccourci **« Extraction de factures »** (ou sur `Lancer.bat`).
