@@ -638,24 +638,61 @@
     if (panel) { panel.open = true; panel.scrollIntoView({ block: "start" }); }
   }
 
+  /* ---------------------------------------------------------- heatmap */
+
+  // Absolute compares every cell on one scale; relative divides each cell by
+  // its own supplier's busiest day. Both fills are computed server-side and
+  // carried on the cell, so switching is a repaint, not a reload.
+  const heatCard = $("#heatmapCard");
+  if (heatCard) {
+    const setMode = (mode) => {
+      heatCard.dataset.mode = mode;
+      $$(".heat-cell", heatCard).forEach((cell) => {
+        cell.setAttribute("fill", cell.dataset[mode === "rel" ? "fillRel" : "fillAbs"]);
+      });
+      $$("[data-heat-mode]", heatCard).forEach((button) => {
+        const active = button.dataset.heatMode === mode;
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+      });
+      $$("[data-heat-sub], [data-heat-legend]", heatCard).forEach((node) => {
+        node.hidden = (node.dataset.heatSub || node.dataset.heatLegend) !== mode;
+      });
+    };
+    $$("[data-heat-mode]", heatCard).forEach((button) => {
+      button.addEventListener("click", () => setMode(button.dataset.heatMode));
+    });
+  }
+
   /* ------------------------------------------------------ chart tooltips */
 
   const tooltip = $("#chartTooltip");
   if (tooltip) {
+    // Never innerHTML here: the label is a supplier name read off a document,
+    // i.e. text an outsider controls by sending an invoice.
+    const showTip = (event, label, value) => {
+      tooltip.textContent = "";
+      const strong = document.createElement("b");
+      strong.textContent = label;
+      tooltip.appendChild(strong);
+      tooltip.appendChild(document.createTextNode(value));
+      tooltip.hidden = false;
+      const box = tooltip.getBoundingClientRect();
+      tooltip.style.left = Math.min(event.clientX + 14, window.innerWidth - box.width - 10) + "px";
+      tooltip.style.top = Math.max(10, event.clientY - box.height - 12) + "px";
+    };
+
+    $$(".heat-cell").forEach((cell) => {
+      cell.addEventListener("mousemove", (event) => {
+        const relative = heatCard && heatCard.dataset.mode === "rel";
+        showTip(event, cell.dataset.label, relative ? cell.dataset.valueRel : cell.dataset.valueAbs);
+      });
+      cell.addEventListener("mouseleave", () => { tooltip.hidden = true; });
+    });
+
     $$(".bar-group").forEach((group) => {
       group.addEventListener("mousemove", (event) => {
-        // Never innerHTML here: the label is a supplier name read off a
-        // document, i.e. text an outsider controls by sending an invoice.
-        tooltip.textContent = "";
-        const strong = document.createElement("b");
-        strong.textContent = group.dataset.label;
-        tooltip.appendChild(strong);
-        tooltip.appendChild(document.createTextNode(group.dataset.value));
-        tooltip.hidden = false;
-        const box = tooltip.getBoundingClientRect();
-        const x = Math.min(event.clientX + 14, window.innerWidth - box.width - 10);
-        tooltip.style.left = x + "px";
-        tooltip.style.top = Math.max(10, event.clientY - box.height - 12) + "px";
+        showTip(event, group.dataset.label, group.dataset.value);
       });
       group.addEventListener("mouseleave", () => { tooltip.hidden = true; });
     });

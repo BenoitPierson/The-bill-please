@@ -221,6 +221,16 @@ and drops the axis entirely. Both charts are single-series, so no legend.
 The UI commits to a single light theme on purpose (`color-scheme: light`); there is no dark
 variant to keep in sync.
 
+**Heatmap (day × supplier).** `daily_heatmap` computes *both* fills per cell — absolute
+(share of the grid's maximum) and relative (share of that supplier's own busiest day) — and
+the toggle in `app.js` swaps `data-fill-abs` / `data-fill-rel` without a reload. Green→red
+was a product request; it works as a magnitude ramp only because `HEAT_STOPS` also falls
+monotonically in lightness, which is what keeps it readable in greyscale and for a
+colour-blind reader — **check that property if you touch the stops** (the test suite does).
+Colour is never the sole channel: each cell carries its value in an SVG `<title>` and in the
+hover tooltip. The grid is capped (12 suppliers, 45 most recent days) and says what it hid;
+it scrolls sideways rather than shrinking cells below a readable size.
+
 **Amounts are summed as stored, across currencies.** `dashboard_stats` returns a currency
 breakdown and the template warns when more than one is present — do not add a total that
 silently mixes currencies. The extraction prompt normalises currencies to ISO 4217 codes
@@ -255,6 +265,10 @@ Checked by the security suite; breaking one of these is a vulnerability, not a r
 - **Session = tenant + account.** `current_user` refuses a cookie whose tenant is not the
   host's *and* one whose account no longer exists; `/login` clears the session before
   setting it, and `auth` locks an email+IP after `FAILURES_BEFORE_LOCK` failures.
+- **Framing is `'self'`, never `'none'`.** The document viewer iframes the original from this
+  same origin, and `X-Frame-Options: DENY` / `frame-ancestors 'none'` breaks it — Firefox
+  refuses even a same-origin frame. `SAMEORIGIN` / `'self'` still blocks clickjacking from
+  another site, which is the point of the header.
 - **Cookies are `Secure` as soon as `APP_DOMAIN` is set** (`SESSION_HTTPS_ONLY` overrides).
   `same_site="lax"` is what stands in for CSRF tokens — do not widen it to "none".
 - **Uploads are capped** (`MAX_UPLOAD_MB`): the request body is held in memory while it is

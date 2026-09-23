@@ -733,6 +733,22 @@ def dashboard_stats(slug: str, filters: Dict[str, Any]) -> Dict[str, Any]:
             params,
         ).fetchall()
 
+        # One row per (day, supplier) for the heatmap. Kept unaggregated by
+        # month on purpose: the grid is the only view that shows *when* in the
+        # month a supplier invoices.
+        by_day_supplier = conn.execute(
+            """
+            SELECT invoice_date                 AS day,
+                   supplier_name                AS supplier,
+                   IFNULL(SUM(total_amount), 0) AS amount,
+                   COUNT(*)                     AS invoice_count
+            FROM invoices{}{} invoice_date IS NOT NULL AND length(invoice_date) = 10
+              AND supplier_name IS NOT NULL AND supplier_name != ''
+            GROUP BY day, supplier ORDER BY day
+            """.format(clause, " AND" if clause else " WHERE"),
+            params,
+        ).fetchall()
+
         currencies = conn.execute(
             "SELECT IFNULL(currency,'') AS currency, COUNT(*) AS n FROM invoices{}"
             " GROUP BY currency ORDER BY n DESC".format(clause),
@@ -743,5 +759,6 @@ def dashboard_stats(slug: str, filters: Dict[str, Any]) -> Dict[str, Any]:
         "totals": dict(totals) if totals else {},
         "by_month": [dict(r) for r in by_month],
         "by_supplier": [dict(r) for r in by_supplier],
+        "by_day_supplier": [dict(r) for r in by_day_supplier],
         "currencies": [dict(r) for r in currencies if r["currency"]],
     }

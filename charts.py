@@ -141,6 +141,173 @@ def monthly_columns(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+# Heatmap ramp, light green (nothing) to dark red (the maximum). Green->red was
+# asked for; what makes it readable as a *magnitude* is that lightness falls
+# monotonically along the ramp, so the grid still reads in greyscale and for a
+# colour-blind reader. Values are never colour-only: every cell carries them in
+# its tooltip.
+HEAT_STOPS = (
+    (0.00, (233, 245, 225)),
+    (0.25, (207, 230, 164)),
+    (0.50, (240, 191, 74)),
+    (0.75, (222, 108, 53)),
+    (1.00, (168, 31, 26)),
+)
+# Past this level the fill is dark enough that ink has to flip to white.
+HEAT_DARK_FROM = 0.68
+
+
+def heat_color(level: float) -> str:
+    """Colour for a level in 0..1, interpolated between the ramp stops."""
+    level = min(1.0, max(0.0, float(level)))
+    for (low, low_rgb), (high, high_rgb) in zip(HEAT_STOPS, HEAT_STOPS[1:]):
+        if level <= high:
+            span = high - low
+            ratio = (level - low) / span if span else 0.0
+            channels = [
+                int(round(low_rgb[i] + (high_rgb[i] - low_rgb[i]) * ratio)) for i in range(3)
+            ]
+            return "#{:02x}{:02x}{:02x}".format(*channels)
+    return "#{:02x}{:02x}{:02x}".format(*HEAT_STOPS[-1][1])
+
+
+def format_percent(value: float) -> str:
+    """'38 %', with the narrow no-break space French typography expects."""
+    return "{:.0f}{}%".format(round(float(value)), THIN_SPACE)
+
+
+def day_label(day: str) -> str:
+    """'2026-02-07' -> '7 fevr.'"""
+    if not day or len(day) < 10:
+        return day or ""
+    return "{} {}".format(int(day[8:10]), MONTH_NAMES.get(day[5:7], day[5:7]))
+
+
+def daily_heatmap(
+    rows: Sequence[Dict[str, Any]], max_days: int = 45, max_suppliers: int = 12
+) -> Dict[str, Any]:
+    """Grid of (day x supplier) amounts, in absolute and relative shades.
+
+    Both scales are computed here rather than in the browser: absolute compares
+    cells across the whole grid, relative compares a supplier to its own busiest
+    day, which is the only way a small supplier's rhythm is visible next to a
+    large one. The template draws both fills and the toggle swaps them.
+    """
+    label_width = 168.0
+    cell_width, row_height = 18.0, 22.0
+    gap = 2.0  # the house 2px gap between neighbouring fills
+    month_baseline, day_baseline, grid_top = 12.0, 28.0, 34.0
+
+    entries = [
+        r for r in rows
+        if r.get("supplier") and r.get("day") and r.get("amount") is not None
+    ]
+    if not entries:
+        return {"empty": True, "width": 720.0, "height": 80.0}
+
+    totals: Dict[str, float] = {}
+    for row in entries:
+        totals[row["supplier"]] = totals.get(row["supplier"], 0.0) + float(row["amount"])
+    ranked = sorted(totals, key=lambda name: (-totals[name], name))
+    suppliers = ranked[:max_suppliers]
+    kept = set(suppliers)
+
+    all_days = sorted({r["day"] for r in entries if r["supplier"] in kept})
+    days = all_days[-max_days:]  # the most recent window, read left to right
+    day_index = {day: i for i, day in enumerate(days)}
+
+    grid: Dict[tuple, Dict[str, Any]] = {}
+    for row in entries:
+        key = (row["supplier"], row["day"])
+        if row["supplier"] not in kept or row["day"] not in day_index:
+            continue
+        cell = grid.setdefault(key, {"amount": 0.0, "count": 0})
+        cell["amount"] += float(row["amount"])
+        cell["count"] += int(row.get("invoice_count") or 0)
+
+    overall_max = max((c["amount"] for c in grid.values()), default=0.0) or 1.0
+    supplier_max = {name: 0.0 for name in suppliers}
+    for (supplier, _), cell in grid.items():
+        supplier_max[supplier] = max(supplier_max[supplier], cell["amount"])
+
+    cells = []
+    for row_index, supplier in enumerate(suppliers):
+        peak = supplier_max.get(supplier) or 1.0
+        for (cell_supplier, day), cell in grid.items():
+            if cell_supplier != supplier:
+                continue
+            amount = cell["amount"]
+            share = amount / peak if peak else 0.0
+            cells.append(
+                {
+                    "x": label_width + cell_width * day_index[day] + gap / 2,
+                    "y": grid_top + row_height * row_index + gap / 2,
+                    "width": cell_width - gap,
+                    "height": row_height - gap,
+                    "fill_abs": heat_color(amount / overall_max),
+                    "fill_rel": heat_color(share),
+                    "supplier": supplier,
+                    "day": day,
+                    "label": "{} · {}".format(day_label(day), supplier),
+                    "value_abs": format_amount(amount),
+                    "value_rel": format_percent(share * 100),
+                    "count": cell["count"],
+                }
+            )
+
+    # One month label per run of days, and day numbers only when they fit.
+    months, day_ticks = [], []
+    seen_month = None
+    step = 1 if len(days) <= 16 else (3 if len(days) <= 40 else 5)
+    for index, day in enumerate(days):
+        x = label_width + cell_width * index + cell_width / 2
+        if day[:7] != seen_month:
+            seen_month = day[:7]
+            months.append({"label": month_label(day[:7]), "x": x - cell_width / 2 + 1})
+        if index % step == 0:
+            day_ticks.append({"label": str(int(day[8:10])), "x": x})
+
+    legend = [
+        {
+            "fill": heat_color(level),
+            "abs_label": format_compact(overall_max * level),
+            "rel_label": format_percent(level * 100),
+        }
+        for level in (0.0, 0.25, 0.5, 0.75, 1.0)
+    ]
+
+    return {
+        "empty": False,
+        "width": label_width + cell_width * len(days),
+        "height": grid_top + row_height * len(suppliers) + 6,
+        "label_width": label_width,
+        "month_baseline": month_baseline,
+        "day_baseline": day_baseline,
+        "rows": [
+            {
+                "supplier": name,
+                "name_short": name if len(name) <= 24 else name[:23] + "…",
+                "text_y": grid_top + row_height * index + row_height / 2 + 4,
+                "y": grid_top + row_height * index,
+            }
+            for index, name in enumerate(suppliers)
+        ],
+        "cells": cells,
+        "months": months,
+        "day_ticks": day_ticks,
+        "legend": legend,
+        "row_height": row_height,
+        "max_amount": overall_max,
+        "max_amount_text": format_amount(overall_max),
+        "day_count": len(days),
+        "supplier_count": len(suppliers),
+        "hidden_suppliers": max(0, len(ranked) - len(suppliers)),
+        "hidden_days": max(0, len(all_days) - len(days)),
+        "first_day": days[0] if days else "",
+        "last_day": days[-1] if days else "",
+    }
+
+
 def supplier_bars(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """Horizontal ranking: top suppliers by invoiced amount.
 

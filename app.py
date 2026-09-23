@@ -67,9 +67,12 @@ async def security_headers(request: Request, call_next):
     """Baseline hardening for every response.
 
     The CSP is the real one: it forbids inline and third-party scripts, so a
-    value that slipped through escaping somewhere cannot execute. Client
-    documents are shown in an iframe from this same origin, hence 'self' for
-    frame-src, and nothing may frame the application itself.
+    value that slipped through escaping somewhere cannot execute.
+
+    Framing is 'self', not 'none': the document viewer shows the original
+    invoice in an iframe served by this same origin, and a blanket DENY breaks
+    it (Firefox refuses even a same-origin frame). Another site still cannot
+    frame the application, which is what the clickjacking rule is about.
     """
     response = await call_next(request)
     response.headers.setdefault(
@@ -78,11 +81,11 @@ async def security_headers(request: Request, call_next):
         # that carry chart geometry; scripts stay strictly external.
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
-        "object-src 'self'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+        "object-src 'self'; frame-src 'self'; frame-ancestors 'self'; base-uri 'none'; "
         "form-action 'self'",
     )
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "same-origin")
     # Client invoices must never be cached by a proxy on the way.
     if request.url.path.startswith(("/invoices", "/api", "/dashboard")):
@@ -350,6 +353,7 @@ def dashboard(request: Request) -> Response:
             "currency_label": currency_label,
             "monthly": charts.monthly_columns(stats["by_month"]),
             "suppliers_chart": charts.supplier_bars(stats["by_supplier"]),
+            "heatmap": charts.daily_heatmap(stats["by_day_supplier"]),
         }
     )
     return templates.TemplateResponse("dashboard.html", context)

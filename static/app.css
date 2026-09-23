@@ -331,6 +331,32 @@ code { background: var(--plane); padding: 1px 5px; border-radius: 4px; }
 .progress-bar { height: 100%; width: 0; background: var(--series-1); transition: width .3s ease; }
 .eta { margin: 8px 0 0; font-size: 13px; color: var(--ink-secondary); font-variant-numeric: tabular-nums; }
 
+/* ------------------------------------------------------------------ heatmap */
+
+.chart-head-split { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+
+.toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.toggle-btn {
+  appearance: none; border: 0; background: var(--surface); color: var(--ink-secondary);
+  font: inherit; font-size: 13px; padding: 6px 12px; cursor: pointer;
+}
+.toggle-btn + .toggle-btn { border-left: 1px solid var(--border); }
+.toggle-btn:hover { background: var(--plane); }
+.toggle-btn.is-active { background: var(--plane); color: var(--ink); font-weight: 600; }
+
+/* The grid keeps its own width: squeezing a quarter's worth of days into the
+   card would make the cells unreadable, so it scrolls sideways instead. */
+.heat-scroll { overflow-x: auto; padding-bottom: 4px; }
+.chart.heat { display: block; }
+.heat-month { font-weight: 600; }
+.heat-cell { stroke: none; cursor: default; }
+.heat-cell:hover { stroke: var(--ink); stroke-width: 1.5; }
+
+.heat-foot { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
+.heat-legend { display: flex; align-items: center; gap: 4px; }
+.heat-swatch { width: 26px; height: 10px; border-radius: 2px; display: inline-block; }
+.heat-note { margin: 0; max-width: 60ch; }
+
 /* ---------------------------------------------------------- import summary */
 
 /* Two classes: .modal-body (fixed 90vh, for the document viewer) comes later in this file. */

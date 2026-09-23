@@ -150,5 +150,80 @@
   {% endif %}
 </section>
 
+<!-- Day x supplier heatmap -------------------------------------------------->
+<section class="card chart-card" id="heatmapCard" data-mode="abs">
+  <header class="chart-head chart-head-split">
+    <div>
+      <h2>Montant par jour et par fournisseur</h2>
+      <span class="chart-sub">
+        {% if heatmap.empty %}
+          Aucune facture datee sur la periode.
+        {% else %}
+          <span data-heat-sub="abs">Montant facture, en {{ currency }} — du vert (faible) au rouge (maximum : {{ heatmap.max_amount_text }})</span>
+          <span data-heat-sub="rel" hidden>Part du plus gros jour de chaque fournisseur — du vert (0 %) au rouge (100 %)</span>
+        {% endif %}
+      </span>
+    </div>
+    {% if not heatmap.empty %}
+    <div class="toggle" role="group" aria-label="Echelle de la heatmap">
+      <button type="button" class="toggle-btn is-active" data-heat-mode="abs" aria-pressed="true">Valeur absolue</button>
+      <button type="button" class="toggle-btn" data-heat-mode="rel" aria-pressed="false">Valeur relative</button>
+    </div>
+    {% endif %}
+  </header>
+
+  {% if heatmap.empty %}
+  <p class="empty">Aucune facture datee sur la periode.</p>
+  {% else %}
+  <div class="heat-scroll">
+    <svg class="chart heat" width="{{ heatmap.width }}" height="{{ heatmap.height }}"
+         viewBox="0 0 {{ heatmap.width }} {{ heatmap.height }}" role="img"
+         aria-label="Montant facture par jour et par fournisseur">
+      {% for month in heatmap.months %}
+      <text class="axis-text heat-month" x="{{ month.x }}" y="{{ heatmap.month_baseline }}">{{ month.label }}</text>
+      {% endfor %}
+      {% for tick in heatmap.day_ticks %}
+      <text class="axis-text" x="{{ tick.x }}" y="{{ heatmap.day_baseline }}" text-anchor="middle">{{ tick.label }}</text>
+      {% endfor %}
+
+      {% for row in heatmap.rows %}
+      <text class="row-label" x="{{ heatmap.label_width - 10 }}" y="{{ row.text_y }}" text-anchor="end">{{ row.name_short }}</text>
+      {% endfor %}
+
+      {% for cell in heatmap.cells %}
+      <rect class="heat-cell" x="{{ cell.x }}" y="{{ cell.y }}" width="{{ cell.width }}" height="{{ cell.height }}" rx="3"
+            fill="{{ cell.fill_abs }}"
+            data-fill-abs="{{ cell.fill_abs }}" data-fill-rel="{{ cell.fill_rel }}"
+            data-label="{{ cell.label }}"
+            data-value-abs="{{ cell.value_abs }} {{ currency }} · {{ cell.count }} facture{{ 's' if cell.count > 1 else '' }}"
+            data-value-rel="{{ cell.value_rel }} du plus gros jour · {{ cell.value_abs }} {{ currency }}">
+        <title>{{ cell.label }} — {{ cell.value_abs }} {{ currency }} ({{ cell.value_rel }} du maximum du fournisseur)</title>
+      </rect>
+      {% endfor %}
+    </svg>
+  </div>
+
+  <footer class="heat-foot">
+    <div class="heat-legend">
+      <span class="muted small" data-heat-legend="abs">0</span>
+      <span class="muted small" data-heat-legend="rel" hidden>0 %</span>
+      {% for stop in heatmap.legend %}
+      <span class="heat-swatch" style="background: {{ stop.fill }}"
+            title="{{ stop.abs_label }} {{ currency }} / {{ stop.rel_label }}"></span>
+      {% endfor %}
+      <span class="muted small" data-heat-legend="abs">{{ heatmap.legend[-1].abs_label }} {{ currency }}</span>
+      <span class="muted small" data-heat-legend="rel" hidden>100 %</span>
+    </div>
+    <p class="hint heat-note">
+      {{ heatmap.supplier_count }} fournisseur{{ 's' if heatmap.supplier_count > 1 else '' }}
+      sur {{ heatmap.day_count }} jour{{ 's' if heatmap.day_count > 1 else '' }} factures.
+      {% if heatmap.hidden_suppliers %}{{ heatmap.hidden_suppliers }} fournisseur{{ 's' if heatmap.hidden_suppliers > 1 else '' }} de plus petit volume non affiche{{ 's' if heatmap.hidden_suppliers > 1 else '' }}.{% endif %}
+      {% if heatmap.hidden_days %}Seuls les {{ heatmap.day_count }} jours les plus recents sont affiches.{% endif %}
+      Affine avec les filtres ci-dessus.
+    </p>
+  </footer>
+  {% endif %}
+</section>
+
 <div class="chart-tooltip" id="chartTooltip" hidden></div>
 {% endblock %}

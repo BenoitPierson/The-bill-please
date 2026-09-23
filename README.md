@@ -33,6 +33,10 @@ des principaux fournisseurs. Filtrable par fournisseur et par période.
 - **Édition directe** : clique dans une cellule, modifie, appuie sur Entrée. Modifiables :
   fournisseur, numéro, date, montant, devise, TVA. Les montants acceptent le format français
   (`1 234,56`).
+- **Heatmap jour × fournisseur** (Dashboard) : une case par jour et par fournisseur, du vert
+  (faible) au rouge (maximum). Le bouton **Valeur relative** rapporte chaque case au plus gros
+  jour du fournisseur et affiche un pourcentage — c'est la vue qui rend visible le rythme d'un
+  petit fournisseur à côté d'un gros. Survole une case pour le montant exact.
 - **Filtres** : fournisseur, période, état (à vérifier / en erreur / sans erreur), recherche
   libre.
 - **Vérification contre l'original** : clique sur le nom du fichier pour afficher la facture
