@@ -309,6 +309,10 @@ def _process_one(
             "file_size": size,
         },
     )
+    # Product lines feed the Products tab; an invoice without an itemised table
+    # simply has none.
+    if result.lines:
+        db.insert_lines(slug, invoice_id, result.lines)
     # Only documents that went through extraction feed the estimate: duplicates
     # and early refusals take milliseconds and would make it wildly optimistic.
     state.record_extraction(time.monotonic() - started)

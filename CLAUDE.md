@@ -116,6 +116,13 @@ must survive the user leaving the page mid-import, so it is re-offered on page l
 `acknowledged_at`); the migration marks pre-existing batches acknowledged so they don't pop
 up after an upgrade. Links in the summary use the `batch` filter of `/invoices`.
 
+One catch worth keeping in mind: a summary link pointing at an **anchor of the page already
+shown** (`/invoices#doublons`) does nothing on its own — the browser jumps without reloading,
+so the modal stays up and the panel never opens. Such links carry `data-summary-anchor`, and
+the handler acknowledges the batch, waits for that to land (a reload would race it and bring
+the pop-up straight back), then reloads onto the anchor, where `openDuplicates` opens the
+panel with the rows the import just added.
+
 `InvoiceSource` holds archive bytes lazily: members are read only when a worker picks them
 up, so a 300 MB archive is never fully decompressed in memory. The shared `archive_bytes` is
 immutable and each read wraps it in a fresh `ZipFile`, because zipfile handles are not
@@ -235,6 +242,55 @@ it scrolls sideways rather than shrinking cells below a readable size.
 breakdown and the template warns when more than one is present — do not add a total that
 silently mixes currencies. The extraction prompt normalises currencies to ISO 4217 codes
 specifically so this stays rare.
+
+### Products tab: per-product cost drift
+
+Line items are extracted alongside the header fields (`lines` in `INVOICE_SCHEMA`) and stored
+in `invoice_lines`, one row per billed article. Three decisions hold the feature together:
+
+- **`product_key` is the whole point.** The model returns a generic French name — no brand,
+  no packaging, no grade — so supplier A's "Red Tomatoes 5kg" and supplier B's "Tomatoes"
+  collapse onto `tomate`. Ordering by (category, `product_key`) is what the user means by
+  *semantic* rather than alphabetical order: the same goods end up adjacent whatever each
+  supplier calls them. `label` keeps the printed wording for the table.
+- **The unit is part of the grouping key** (product + supplier + unit + currency). 2 EUR/kg
+  and 2 EUR/carton are not comparable, and merging them invents price drifts that are really
+  packaging differences.
+- **Nothing relies on the model answering identically twice.** It does not: the same printed
+  line came back as `frites`/`piece` and `frite`/`carton`, splitting one product into three
+  rows. `canonical()` folds case, accents, punctuation, plurals and elided articles, and
+  `_resolve_variants` lets every line sharing a supplier + printed label vote on one key and
+  one unit — the label is on the document, the key and unit are only the model's reading of
+  it. A group whose unit was read inconsistently is flagged in the table rather than silently
+  resolved.
+- **Supplier spellings are merged conservatively.** `resolve_suppliers` drops legal forms
+  ("LIMITED", "SARL"…) and merges two names only when one's remaining words are a subset of
+  the other's: `FRESHCHIPS LIMITED` ⊂ `FRESHCHIPS PROCESSORS LIMITED` merges, `Bidco Foods`
+  vs `Bidco Oil` does not. One-letter words are kept here (unlike `canonical`), or
+  "Fournisseur A" and "Fournisseur B" would collapse into one. Comparing suppliers is the
+  point of the tab, so a wrong merge is worse than two rows. **This applies to the Products
+  tab only** — Dashboard, Invoices and the filters still show the extracted name verbatim.
+- **The alert threshold is a reading choice, not a query.** Each row carries its `drift`
+  (how far max sits above the average, in percent); the slider repaints client-side and
+  writes itself into the forms' hidden `threshold`, so filtering keeps the setting.
+- **A price points back at its invoice.** `minimum_ref` / `maximum_ref` carry the invoice
+  behind the extreme (the most recent one when several share that price), which the table
+  shows in the cell tooltip and links to `/invoices/{id}/file`. An alert is only actionable
+  if the document is one click away.
+
+`products.summarise` is a pure function over raw rows — no DB — which is why the statistics
+are unit-tested directly. `db.product_lines` deliberately returns raw lines rather than
+SQL aggregates: picking the most frequent wording and category per group is trivial in
+Python and awkward in SQLite, and the same rows feed the price-history scatter.
+
+**Line extraction only applies to imports made after it shipped**, and deduplication blocks
+re-importing the same files, so backfilling an existing corpus needs a re-extraction pass
+(not built — it was declined as out of scope; it would re-read stored originals and replace
+the rows). The empty state on the tab says so.
+
+`max_tokens` had to go from 2048 to 8192: a 40-line invoice truncates otherwise, and a
+truncated JSON is a failed extraction. This costs real money on output tokens — roughly
+half a cent to a cent per invoice — so do not add verbose fields to the schema lightly.
 
 ### UI conventions (product decisions)
 

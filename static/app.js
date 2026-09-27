@@ -571,6 +571,7 @@
         const more = el("a", "summary-more", `Voir les ${data.duplicates} doublons`);
         more.href = "/invoices#doublons";
         more.dataset.summaryLink = "";
+        more.dataset.summaryAnchor = "";
         section.appendChild(more);
       }
       content.appendChild(section);
@@ -622,7 +623,25 @@
     document.addEventListener("keydown", onKey);
     // Following a link from the summary also counts as having seen it.
     $$("[data-summary-link], #summaryPrimary", summaryModal).forEach((link) => {
-      link.onclick = () => { acknowledge(batchId); };
+      link.onclick = async (event) => {
+        // A link to an anchor of the page we are already on changes nothing on
+        // its own: the browser jumps without reloading, so the modal stays up
+        // and the panel never opens. Reload so the page comes back with the
+        // rows this import just added, and opens the panel on arrival. The
+        // test is "is the panel on this page", not the route, so it holds
+        // wherever the panel is rendered.
+        if ("summaryAnchor" in link.dataset && $("#doublons")) {
+          event.preventDefault();
+          // Wait for the acknowledgement: reloading first would race it, and
+          // the page would come back with the summary still pending — the
+          // pop-up would reopen on top of the panel the user just asked for.
+          await acknowledge(batchId);
+          window.location.hash = "doublons";
+          window.location.reload();
+          return;
+        }
+        acknowledge(batchId);
+      };
     });
   }
 
@@ -632,10 +651,55 @@
     showImportSummary(document.body.dataset.pendingSummary);
   }
 
-  // The duplicates panel can be linked to directly from the summary.
-  if (window.location.hash === "#doublons") {
+  // The duplicates panel can be linked to directly from the summary — on
+  // arrival, and also when the hash changes while the page stays put.
+  function openDuplicates() {
+    if (window.location.hash !== "#doublons") return;
     const panel = $("#doublons");
     if (panel) { panel.open = true; panel.scrollIntoView({ block: "start" }); }
+  }
+
+  openDuplicates();
+  window.addEventListener("hashchange", openDuplicates);
+
+  /* --------------------------------------------------------- products */
+
+  // The alert threshold is a reading choice, not a query: every row already
+  // carries its drift, so the slider repaints instead of reloading the page.
+  const productTable = $("#productTable");
+  if (productTable) {
+    const range = $("#thresholdRange");
+    const readout = $("#thresholdValue");
+    const alertCount = $("#alertCount");
+    const rows = $$("tbody tr", productTable);
+
+    const apply = (threshold) => {
+      let flagged = 0;
+      rows.forEach((row) => {
+        const over = parseFloat(row.dataset.drift) > threshold;
+        row.classList.toggle("is-alert", over);
+        if (over) flagged += 1;
+      });
+      readout.textContent = threshold;
+      $$(".threshold-echo").forEach((node) => { node.textContent = threshold; });
+      if (alertCount) alertCount.textContent = flagged;
+      // Carried into the filter and selection forms, so the setting survives.
+      $$('input[name="threshold"]').forEach((input) => { input.value = threshold; });
+    };
+
+    apply(parseInt(range.value, 10));
+    range.addEventListener("input", () => apply(parseInt(range.value, 10)));
+  }
+
+  const selectionSelect = $("#selectionSelect");
+  if (selectionSelect) {
+    selectionSelect.addEventListener("change", () => {
+      // Submitting the form would land at the top of the page, far from the
+      // chart the user just changed. Navigating ourselves keeps the anchor.
+      const form = $("#selectionForm");
+      const query = new URLSearchParams(new FormData(form)).toString();
+      window.location.href = `${form.getAttribute("action")}?${query}#evolution`;
+    });
   }
 
   /* ---------------------------------------------------------- heatmap */
@@ -681,6 +745,13 @@
       tooltip.style.left = Math.min(event.clientX + 14, window.innerWidth - box.width - 10) + "px";
       tooltip.style.top = Math.max(10, event.clientY - box.height - 12) + "px";
     };
+
+    $$(".dot").forEach((dot) => {
+      dot.addEventListener("mousemove", (event) => {
+        showTip(event, dot.dataset.label, " · " + dot.dataset.value);
+      });
+      dot.addEventListener("mouseleave", () => { tooltip.hidden = true; });
+    });
 
     $$(".heat-cell").forEach((cell) => {
       cell.addEventListener("mousemove", (event) => {

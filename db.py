@@ -74,6 +74,26 @@ CREATE TABLE IF NOT EXISTS invoices (
     updated_at       TEXT NOT NULL
 );
 
+-- One row per product line of an invoice. A new table (not new columns), so
+-- `CREATE TABLE IF NOT EXISTS` is enough to bring existing tenant databases up
+-- to date; only added *columns* need an entry in MIGRATIONS.
+CREATE TABLE IF NOT EXISTS invoice_lines (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id   TEXT NOT NULL,
+    line_no      INTEGER NOT NULL DEFAULT 0,
+    label        TEXT NOT NULL,
+    product_key  TEXT NOT NULL,
+    category     TEXT,
+    quantity     REAL,
+    unit         TEXT,
+    unit_price   REAL,
+    line_total   REAL,
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_lines_invoice ON invoice_lines(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_lines_product ON invoice_lines(product_key);
+
 CREATE INDEX IF NOT EXISTS idx_invoices_supplier ON invoices(supplier_name);
 CREATE INDEX IF NOT EXISTS idx_invoices_date     ON invoices(invoice_date);
 CREATE INDEX IF NOT EXISTS idx_invoices_batch    ON invoices(batch_id);
@@ -452,6 +472,34 @@ def find_by_fingerprint(slug: str, content_sha256: str) -> Optional[sqlite3.Row]
 def delete_invoice(slug: str, invoice_id: str) -> None:
     with connect(slug) as conn:
         conn.execute("DELETE FROM invoices WHERE id = ?", (invoice_id,))
+        # No foreign keys in SQLite by default: the lines would otherwise
+        # survive their invoice and keep counting in the product statistics.
+        conn.execute("DELETE FROM invoice_lines WHERE invoice_id = ?", (invoice_id,))
+
+
+def insert_lines(slug: str, invoice_id: str, lines: List[Dict[str, Any]]) -> int:
+    """Store the product lines read off one invoice."""
+    if not lines:
+        return 0
+    timestamp = now()
+    with connect(slug) as conn:
+        conn.executemany(
+            """
+            INSERT INTO invoice_lines (
+                invoice_id, line_no, label, product_key, category,
+                quantity, unit, unit_price, line_total, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                (
+                    invoice_id, index, line.get("label") or "", line.get("product_key") or "",
+                    line.get("category"), line.get("quantity"), line.get("unit"),
+                    line.get("unit_price"), line.get("line_total"), timestamp,
+                )
+                for index, line in enumerate(lines)
+            ],
+        )
+    return len(lines)
 
 
 def record_duplicate(
@@ -547,6 +595,35 @@ def list_invoices(slug: str, filters: Dict[str, Any], limit: int = 500, offset: 
             "SELECT COUNT(*) AS n FROM invoices{}".format(clause), params
         ).fetchone()["n"]
     return rows, total
+
+
+def product_lines(slug: str, filters: Dict[str, Any], limit: int = 100000) -> List[Dict[str, Any]]:
+    """Priced invoice lines, filtered like the rest of the app.
+
+    Returned raw rather than aggregated in SQL: picking the most frequent
+    wording and category per product is awkward in SQLite and trivial in
+    Python (see products.summarise), and the same rows feed the price history.
+    """
+    clause, params = _filter_clause(filters)
+    with connect(slug) as conn:
+        rows = conn.execute(
+            """
+            SELECT l.product_key, l.label, l.category, l.quantity, l.unit,
+                   l.unit_price, l.line_total, l.invoice_id,
+                   i.supplier_name AS supplier, i.invoice_date, i.currency,
+                   i.invoice_number, i.filename, i.stored_name
+            FROM invoice_lines l JOIN invoices i ON i.id = l.invoice_id
+            {}{} l.unit_price IS NOT NULL AND l.unit_price > 0 AND i.error IS NULL
+            ORDER BY i.invoice_date, l.id LIMIT ?
+            """.format(clause, " AND" if clause else " WHERE"),
+            params + [limit],
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def count_lines(slug: str) -> int:
+    with connect(slug) as conn:
+        return conn.execute("SELECT COUNT(*) AS n FROM invoice_lines").fetchone()["n"]
 
 
 def get_invoice(slug: str, invoice_id: str) -> Optional[sqlite3.Row]:

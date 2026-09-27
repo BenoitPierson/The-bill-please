@@ -38,6 +38,23 @@ Pour arrêter l'outil : ferme la fenêtre noire du terminal.
 factures à vérifier et en erreur. Deux graphiques : montant facturé par mois, et classement
 des principaux fournisseurs. Filtrable par fournisseur et par période.
 
+**Products** — l'analyse des coûts par produit. Pour chaque couple produit / fournisseur (et
+unité) : prix unitaire moyen, minimum, maximum et nombre de factures concernées. Le prix
+maximum passe en rouge quand il dépasse la moyenne de plus du seuil réglé au curseur (25 %
+par défaut). Les produits sont classés par catégorie puis par dénomination générique, si bien
+que « Red tomatoes » d'un fournisseur et « Tomatoes » d'un autre se suivent. En dessous, un
+nuage de points donne l'évolution du coût unitaire dans le temps pour le produit sélectionné,
+tous fournisseurs confondus ou pour un fournisseur précis. Filtrable par période, fournisseur
+et nom de produit.
+
+Les écritures qui désignent la même chose sont regroupées : « frites » et « frite » pour un
+même libellé, et « FRESHCHIPS LIMITED » avec « FRESHCHIPS PROCESSORS LIMITED ». Deux sociétés
+qui partagent seulement leur premier mot (« Bidco Foods » et « Bidco Oil ») restent séparées.
+Quand plusieurs écritures ont été regroupées, la ligne l'indique sous le nom du fournisseur.
+
+Le détail des articles n'est lu que sur les factures importées depuis l'ajout de cet onglet :
+les factures plus anciennes n'y apparaissent pas.
+
 **Invoices** — le tableau de toutes les factures extraites, avec :
 
 - **Surlignage orange pâle** sur les champs dont l'extraction n'est pas sûre : valeur

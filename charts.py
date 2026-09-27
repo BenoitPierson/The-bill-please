@@ -10,7 +10,8 @@ labels applied selectively rather than on every mark.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence
+from datetime import date
+from typing import Any, Dict, List, Optional, Sequence
 
 BAR_MAX_THICKNESS = 24.0
 BAR_GAP = 2.0
@@ -306,6 +307,96 @@ def daily_heatmap(
         "first_day": days[0] if days else "",
         "last_day": days[-1] if days else "",
     }
+
+
+# Scatter puts every pair of series side by side, which caps how many colours
+# stay distinguishable: the house palette validates its first three slots for
+# that case. Beyond three suppliers the rest folds into one grey series.
+SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a")
+OTHER_COLOR = "#898781"
+MAX_SCATTER_SERIES = 3
+
+
+def price_scatter(points: Sequence[Dict[str, Any]], average: Optional[float] = None) -> Dict[str, Any]:
+    """Unit price over time for one product, one dot per invoice line."""
+    width, height = 720.0, 300.0
+    left, right, top, bottom = 68.0, 16.0, 16.0, 34.0
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    baseline = top + plot_height
+
+    dated = [p for p in points if p.get("date")]
+    if not dated:
+        return {"empty": True, "width": width, "height": height}
+
+    prices = [float(p["price"]) for p in dated]
+    maximum = nice_ceiling(max(prices) * 1.05)
+    days = sorted({p["date"] for p in dated})
+    first, last = days[0], days[-1]
+    span = max(1, _days_between(first, last))
+
+    # Suppliers keep their colour whatever the current filter shows: the order
+    # is by volume, and the entity — not its rank in this view — carries it.
+    counts: Dict[str, int] = {}
+    for point in dated:
+        counts[point["supplier"]] = counts.get(point["supplier"], 0) + 1
+    ranked = sorted(counts, key=lambda name: (-counts[name], name))
+    colors = {name: SERIES_COLORS[i] for i, name in enumerate(ranked[:MAX_SCATTER_SERIES])}
+
+    dots = []
+    for point in dated:
+        offset = _days_between(first, point["date"])
+        price = float(point["price"])
+        dots.append({
+            "cx": left + (offset / span) * plot_width if span else left + plot_width / 2,
+            "cy": baseline - (price / maximum) * plot_height if maximum else baseline,
+            "color": colors.get(point["supplier"], OTHER_COLOR),
+            "supplier": point["supplier"],
+            "date": point["date"],
+            "label": "{} · {}".format(day_label(point["date"]), point["supplier"]),
+            "value": "{} {} / {}".format(
+                format_amount(price), point.get("currency") or "", point.get("unit_label") or ""
+            ).strip(),
+        })
+
+    gridlines = [
+        {"y": baseline - (value / maximum) * plot_height, "label": format_compact(value)}
+        for value in _ticks(maximum)
+    ]
+    legend = [{"name": name, "color": colors[name], "count": counts[name]} for name in colors]
+    if len(ranked) > MAX_SCATTER_SERIES:
+        legend.append({
+            "name": "{} autres fournisseurs".format(len(ranked) - MAX_SCATTER_SERIES),
+            "color": OTHER_COLOR,
+            "count": sum(counts[name] for name in ranked[MAX_SCATTER_SERIES:]),
+        })
+
+    return {
+        "empty": False,
+        "width": width,
+        "height": height,
+        "left": left,
+        "right": width - right,
+        "baseline": baseline,
+        "dots": dots,
+        "gridlines": gridlines,
+        "legend": legend,
+        "average_y": baseline - (average / maximum) * plot_height if average and maximum else None,
+        "average_text": format_amount(average) if average else "",
+        "first_label": day_label(first),
+        "last_label": day_label(last),
+        "point_count": len(dots),
+    }
+
+
+def _days_between(first: str, second: str) -> int:
+    """Whole days between two YYYY-MM-DD dates; 0 if either is unusable."""
+    try:
+        start = date(int(first[:4]), int(first[5:7]), int(first[8:10]))
+        end = date(int(second[:4]), int(second[5:7]), int(second[8:10]))
+    except (TypeError, ValueError, IndexError):
+        return 0
+    return (end - start).days
 
 
 def supplier_bars(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:

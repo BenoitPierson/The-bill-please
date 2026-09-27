@@ -35,9 +35,90 @@ EXTRACTED_FIELDS = (
     "vat_amount",
 )
 
+# Product categories are a closed list on purpose: free-form labels drift
+# ("Alimentaire", "Nourriture", "Food") and stop grouping after a few months.
+PRODUCT_CATEGORIES = (
+    "Alimentaire",
+    "Boissons",
+    "Alcool",
+    "Entretien",
+    "Emballage",
+    "Mobilier",
+    "Equipement",
+    "Services",
+    "Transport",
+    "Autre",
+)
+
+# Units are normalised to this list so two suppliers' prices are only ever
+# compared when they mean the same thing (2 EUR/kg is not 2 EUR/carton).
+PRODUCT_UNITS = (
+    "kg", "g", "l", "cl", "piece", "lot", "carton", "palette", "m", "m2", "heure", "jour",
+)
+
+LINE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {
+            "type": "string",
+            "description": "Product description exactly as printed on the invoice line.",
+        },
+        "product_key": {
+            "type": "string",
+            "description": (
+                "Generic French name of the product, lowercase, singular, with no brand, "
+                "no packaging, no colour and no grade — so that the same goods sold by two "
+                "suppliers under different wordings share one key. 'Red Tomatoes 5kg', "
+                "'Tomates grappe' and 'TOMATO (FRESH)' all give 'tomate'. Keep a real "
+                "distinction when it is one: 'tomate cerise' stays distinct from 'tomate'."
+            ),
+        },
+        "category": {
+            "type": "string",
+            "enum": list(PRODUCT_CATEGORIES),
+            "description": "Broad category the product belongs to. Use 'Autre' when none fits.",
+        },
+        "quantity": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "description": "Quantity billed on the line, as a plain number. Null if absent.",
+        },
+        "unit": {
+            "anyOf": [{"type": "string", "enum": list(PRODUCT_UNITS)}, {"type": "null"}],
+            "description": (
+                "Unit the quantity is expressed in, normalised to the list. 'Kgs', 'KG', "
+                "'kilos' give 'kg'; 'pcs', 'pieces', 'each', 'unit' give 'piece'; 'ctn', "
+                "'box', 'carton' give 'carton'; 'ltr', 'litres' give 'l'. Null if the "
+                "invoice gives no unit at all."
+            ),
+        },
+        "unit_price": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "description": (
+                "Price of ONE unit, as printed. If only a line total and a quantity are "
+                "given, divide. Null if neither is available."
+            ),
+        },
+        "line_total": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "description": "Total amount for this line, as a plain number. Null if absent.",
+        },
+    },
+    "required": ["label", "product_key", "category", "quantity", "unit", "unit_price", "line_total"],
+    "additionalProperties": False,
+}
+
 INVOICE_SCHEMA = {
     "type": "object",
     "properties": {
+        "lines": {
+            "type": "array",
+            "items": LINE_SCHEMA,
+            "description": (
+                "One entry per product or service line actually billed on the invoice. "
+                "Empty array when the invoice shows no itemised lines. Never include "
+                "subtotals, VAT lines, totals, discounts or payment lines here."
+            ),
+        },
         "supplier_name": {
             "type": "string",
             "description": "Name of the company or person issuing the invoice.",
@@ -103,6 +184,7 @@ INVOICE_SCHEMA = {
         "total_amount",
         "currency",
         "vat_amount",
+        "lines",
         "extraction_notes",
         "uncertain_fields",
     ],
@@ -121,6 +203,8 @@ Analyse attentivement toutes les images fournies (y compris les tableaux) et ext
 - le montant total TTC ;
 - la devise ;
 - le montant de la TVA (VAT), si elle est mentionnee ;
+- le detail des lignes d'articles (lines) : un element par produit ou service reellement \
+facture.
 
 Regles importantes :
 - Les montants doivent etre des nombres (pas de texte, pas de symbole monetaire), avec un \
@@ -146,6 +230,21 @@ avec le RECEIPT NUMBER (numero de recu/reçu) : ce sont deux identifiants differ
 peuvent tous les deux apparaitre sur le meme document. Le champ invoice_number doit \
 toujours contenir le numero de facture (INVOICE NUMBER / CV INVOICE NUMBER), jamais le \
 RECEIPT NUMBER, meme si le RECEIPT NUMBER est plus visible ou plus proche du haut de page.
+- LIGNES D'ARTICLES (lines) : reprends chaque ligne de produit ou de service facturee, dans \
+l'ordre du document. N'y mets JAMAIS les sous-totaux, la TVA, le total, les remises ou les \
+lignes de reglement. Si la facture n'a pas de detail par article, renvoie un tableau vide.
+- Pour chaque ligne, product_key est le nom GENERIQUE du produit en francais, en minuscules, \
+au singulier, sans marque, sans conditionnement, sans couleur ni calibre : "Red Tomatoes 5kg", \
+"Tomates grappe" et "TOMATO (FRESH)" donnent tous "tomate". C'est cette cle qui permet de \
+comparer deux fournisseurs qui n'ecrivent pas le produit de la meme facon : elle doit donc \
+etre stable d'une facture a l'autre. Garde en revanche les vraies distinctions : \
+"tomate cerise" reste different de "tomate". Le champ label, lui, garde le libelle exact \
+imprime sur la facture.
+- unit_price est le prix d'UNE unite. Si seuls le total de ligne et la quantite figurent, \
+divise l'un par l'autre. Normalise l'unite dans la liste imposee (kg, g, l, cl, piece, lot, \
+carton, palette, m, m2, heure, jour) : "Kgs" et "kilos" donnent "kg", "pcs" et "each" donnent \
+"piece", "ctn" et "box" donnent "carton". Sans cette normalisation, un prix au carton serait \
+compare a un prix au kilo.
 - Remplis uncertain_fields avec le nom de chaque champ dont tu n'es pas sur : valeur illisible, \
 deduite du contexte, ambigue, ou dont l'etiquette sur le document prete a confusion. Ces champs \
 seront surlignes pour relecture humaine : mieux vaut signaler un doute leger que laisser passer \
@@ -183,6 +282,7 @@ class InvoiceResult:
     vat_amount: float | None = None
     extraction_notes: str | None = None
     uncertain_fields: List[str] = field(default_factory=list)
+    lines: List[dict] = field(default_factory=list)
     error: str | None = None
     page_count: int = 0
 
@@ -373,6 +473,48 @@ def _build_content_blocks(pages: list[tuple[bytes, str]]) -> list[dict]:
     return blocks
 
 
+MAX_LINES_PER_INVOICE = 200
+
+
+def _number(value) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def clean_lines(raw) -> List[dict]:
+    """Keep only line items that can actually be compared later.
+
+    The schema constrains the model, but a value that arrives outside the
+    closed lists (or a line with no usable price) would silently pollute the
+    per-product statistics, so it is normalised or dropped here.
+    """
+    lines: List[dict] = []
+    for entry in (raw or [])[:MAX_LINES_PER_INVOICE]:
+        if not isinstance(entry, dict):
+            continue
+        label = (entry.get("label") or "").strip()
+        key = (entry.get("product_key") or "").strip().lower()
+        if not label and not key:
+            continue
+        unit = (entry.get("unit") or "").strip().lower() or None
+        category = entry.get("category")
+        lines.append(
+            {
+                "label": label or key,
+                "product_key": key or label.lower(),
+                "category": category if category in PRODUCT_CATEGORIES else "Autre",
+                "quantity": _number(entry.get("quantity")),
+                "unit": unit if unit in PRODUCT_UNITS else None,
+                "unit_price": _number(entry.get("unit_price")),
+                "line_total": _number(entry.get("line_total")),
+            }
+        )
+    return lines
+
+
 def extract_invoice(
     client: Anthropic,
     filename: str,
@@ -384,7 +526,9 @@ def extract_invoice(
 
     response = client.messages.create(
         model=MODEL,
-        max_tokens=2048,
+        # Line items make the answer much longer than the header fields alone:
+        # a 40-line invoice needs room for all of them or the JSON is truncated.
+        max_tokens=8192,
         thinking={"type": "disabled"},
         # The system prompt is byte-identical for every invoice of a batch (the
         # learned rules are loaded once), while the images differ — the textbook
@@ -417,6 +561,7 @@ def extract_invoice(
 
     uncertain = data.get("uncertain_fields") or []
     return InvoiceResult(
+        lines=clean_lines(data.get("lines")),
         filename=filename,
         supplier_name=data.get("supplier_name"),
         invoice_number=data.get("invoice_number"),

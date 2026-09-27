@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% block title %}Products{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Products</h1>
+    <p class="page-sub">
+      {{ rows | length }} couple{{ 's' if rows | length > 1 else '' }} produit / fournisseur
+      {% if filters.date_from or filters.date_to or filters.supplier or product_search %}
+        <span class="muted">(filtre actif)</span>
+      {% endif %}
+      {% if rows %}
+      · <span id="alertCount">{{ alert_count }}</span> en alerte de prix
+      {% endif %}
+    </p>
+  </div>
+</div>
+
+<!-- Filters ----------------------------------------------------------------->
+<form class="card filters" method="get" action="/products">
+  <input type="hidden" name="threshold" value="{{ threshold | round | int }}">
+  <label class="field">
+    <span>Fournisseur</span>
+    <select name="supplier">
+      <option value="">Tous</option>
+      {% for supplier in suppliers %}
+      <option value="{{ supplier }}" {% if filters.supplier == supplier %}selected{% endif %}>{{ supplier }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>Du</span>
+    <input type="date" name="date_from" value="{{ filters.date_from }}">
+  </label>
+  <label class="field">
+    <span>Au</span>
+    <input type="date" name="date_to" value="{{ filters.date_to }}">
+  </label>
+  <label class="field field-grow">
+    <span>Produit</span>
+    <input type="search" name="product" value="{{ product_search }}" placeholder="tomate, huile, carton...">
+  </label>
+  <div class="filter-actions">
+    <button type="submit" class="btn btn-primary">Filtrer</button>
+    <a href="/products" class="btn btn-ghost">Reinitialiser</a>
+  </div>
+</form>
+
+{% if not rows %}
+<section class="card">
+  <p class="empty">
+    {% if invoices_with_lines %}
+      Aucun produit sur cette periode. Elargis les filtres ci-dessus.
+    {% else %}
+      Aucune ligne de produit n'a encore ete lue.<br>
+      Le detail des articles n'est extrait que depuis les imports realises avec cette version
+      de l'outil : importe de nouvelles factures pour alimenter cet onglet.
+    {% endif %}
+  </p>
+</section>
+{% else %}
+
+<!-- Unit cost table --------------------------------------------------------->
+<section class="card" id="productTable" data-threshold="{{ threshold | round | int }}">
+  <header class="chart-head chart-head-split">
+    <div>
+      <h2>Cout unitaire par produit</h2>
+      <span class="chart-sub">
+        Produits classes par categorie puis par proximite de denomination : deux libelles
+        differents pour un meme produit se suivent.
+      </span>
+    </div>
+    <div class="threshold">
+      <label for="thresholdRange">
+        Seuil d'alerte : <strong><span id="thresholdValue">{{ threshold | round | int }}</span> %</strong>
+        au-dessus du prix moyen
+      </label>
+      <input type="range" id="thresholdRange" min="0" max="100" step="5"
+             value="{{ threshold | round | int }}" aria-describedby="thresholdHelp">
+      <span class="hint" id="thresholdHelp">Glisse pour durcir ou relacher la detection.</span>
+    </div>
+  </header>
+
+  <div class="product-scroll">
+  <table class="data-table product-table">
+    <thead>
+      <tr>
+        <th>Type</th>
+        <th>Produit</th>
+        <th>Fournisseur</th>
+        <th>Unite</th>
+        <th class="num">Prix unitaire moy</th>
+        <th class="num">Prix unitaire min</th>
+        <th class="num">Prix unitaire max</th>
+        <th class="num">Nb de factures</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr data-average="{{ '%.6f' % row.average }}" data-maximum="{{ '%.6f' % row.maximum }}"
+          data-drift="{{ '%.2f' % row.drift }}">
+        <td class="cat">{{ row.category }}</td>
+        <td class="prod">
+          {{ row.label }}
+          {% if row.label | lower != row.product_name %}<div class="muted small">{{ row.product_name }}</div>{% endif %}
+        </td>
+        <td>
+          {{ row.supplier }}
+          {% if row.supplier_variants | length > 1 %}
+          <div class="muted small" title="Ecritures regroupees : {{ row.supplier_variants | join(' / ') }}">
+            {{ row.supplier_variants | length }} ecritures regroupees
+          </div>
+          {% endif %}
+        </td>
+        <td class="muted">
+          {{ row.unit_label }}
+          {% if row.unit_conflict %}
+          <abbr class="unit-warn" title="L'unite n'est pas lue de la meme facon sur toutes les factures de ce produit : l'unite majoritaire a ete retenue.">?</abbr>
+          {% endif %}
+        </td>
+        <td class="num strong">{{ row.average | amount }} {{ row.currency }}</td>
+        {% for bound, ref, extra in [('min', row.minimum_ref, ''), ('max', row.maximum_ref, '%.0f' % row.drift ~ ' % au-dessus du prix moyen · ')] %}
+        <td class="num cell-{{ bound }}"
+            title="{{ extra }}Facture{% if ref.invoice_number %} {{ ref.invoice_number }}{% endif %}{% if ref.date %} du {{ ref.date }}{% endif %}{% if ref.filename %} · {{ ref.filename }}{% endif %}{% if not ref.has_file %} (document non conserve){% endif %}">
+          {{ (row.minimum if bound == 'min' else row.maximum) | amount }} {{ row.currency }}
+          {% if ref.has_file %}
+          <a class="price-doc" href="/invoices/{{ ref.invoice_id }}/file" target="_blank" rel="noopener"
+             aria-label="Ouvrir la facture du prix {{ 'minimum' if bound == 'min' else 'maximum' }}">↗</a>
+          {% endif %}
+        </td>
+        {% endfor %}
+        <td class="num">{{ row.invoice_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="legend">
+    <span class="swatch swatch-alert"></span>
+    Prix maximum superieur de plus de <span class="threshold-echo">{{ threshold | round | int }}</span> %
+    au prix moyen du couple produit / fournisseur.
+  </p>
+</section>
+
+<!-- Price history ----------------------------------------------------------->
+<section class="card chart-card" id="evolution">
+  <header class="chart-head chart-head-split">
+    <div>
+      <h2>Evolution du cout unitaire</h2>
+      <span class="chart-sub">
+        Un point par ligne de facture{% if history.point_count %} · {{ history.point_count }} releve{{ 's' if history.point_count > 1 else '' }}
+        du {{ history.first_label }} au {{ history.last_label }}{% endif %}
+      </span>
+    </div>
+    <form method="get" action="/products" id="selectionForm">
+      <input type="hidden" name="supplier" value="{{ filters.supplier }}">
+      <input type="hidden" name="date_from" value="{{ filters.date_from }}">
+      <input type="hidden" name="date_to" value="{{ filters.date_to }}">
+      <input type="hidden" name="product" value="{{ product_search }}">
+      <input type="hidden" name="threshold" value="{{ threshold | round | int }}">
+      <label class="field">
+        <span>Produit suivi</span>
+        <select name="selection" id="selectionSelect">
+          {% for option in options %}
+          <option value="{{ option.value }}" {% if option.value == selection_value %}selected{% endif %}>{{ option.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <noscript><button type="submit" class="btn">Afficher</button></noscript>
+    </form>
+  </header>
+
+  {% if history.empty %}
+  <p class="empty">Aucun releve de prix pour cette selection.</p>
+  {% else %}
+  <svg class="chart" viewBox="0 0 {{ history.width }} {{ history.height }}" role="img"
+       aria-label="Cout unitaire dans le temps pour {{ selected_label }}">
+    {% for line in history.gridlines %}
+    <line class="grid" x1="{{ history.left }}" y1="{{ line.y }}" x2="{{ history.right }}" y2="{{ line.y }}"/>
+    <text class="axis-text" x="{{ history.left - 10 }}" y="{{ line.y + 4 }}" text-anchor="end">{{ line.label }}</text>
+    {% endfor %}
+
+    {% if history.average_y %}
+    <line class="average-line" x1="{{ history.left }}" y1="{{ history.average_y }}"
+          x2="{{ history.right }}" y2="{{ history.average_y }}"/>
+    <text class="axis-text avg-text" x="{{ history.right }}" y="{{ history.average_y - 6 }}" text-anchor="end">
+      moyenne {{ history.average_text }}
+    </text>
+    {% endif %}
+
+    {% for dot in history.dots %}
+    <circle class="dot" cx="{{ dot.cx }}" cy="{{ dot.cy }}" r="5" fill="{{ dot.color }}"
+            data-label="{{ dot.label }}" data-value="{{ dot.value }}">
+      <title>{{ dot.label }} — {{ dot.value }}</title>
+    </circle>
+    {% endfor %}
+
+    <line class="baseline" x1="{{ history.left }}" y1="{{ history.baseline }}"
+          x2="{{ history.right }}" y2="{{ history.baseline }}"/>
+    <text class="axis-text" x="{{ history.left }}" y="{{ history.baseline + 18 }}">{{ history.first_label }}</text>
+    <text class="axis-text" x="{{ history.right }}" y="{{ history.baseline + 18 }}" text-anchor="end">{{ history.last_label }}</text>
+  </svg>
+
+  {% if history.legend | length > 1 %}
+  <p class="legend scatter-legend">
+    {% for item in history.legend %}
+    <span class="legend-item"><span class="swatch" style="background: {{ item.color }}"></span>{{ item.name }} ({{ item.count }})</span>
+    {% endfor %}
+  </p>
+  {% endif %}
+  {% endif %}
+</section>
+{% endif %}
+
+<div class="chart-tooltip" id="chartTooltip" hidden></div>
+{% endblock %}

@@ -31,6 +31,7 @@ import charts
 import db
 import learning
 import pipeline
+import products
 import tenants
 from config import (
     AUTO_LEARN_THRESHOLD,
@@ -391,6 +392,62 @@ def invoices(request: Request) -> Response:
         }
     )
     return templates.TemplateResponse("invoices.html", context)
+
+
+@app.get("/products", response_class=HTMLResponse)
+def products_page(request: Request) -> Response:
+    slug, email, redirect = _require_login(request)
+    if redirect is not None:
+        return redirect
+
+    filters = _filters_from(request)
+    rows = db.product_lines(slug, filters)
+
+    # Product search is applied here rather than in SQL: the free-text filter
+    # shared with Invoices searches invoice provenance, not product wording.
+    search = (request.query_params.get("product") or "").strip().lower()
+    if search:
+        rows = [r for r in rows
+                if search in (r.get("label") or "").lower()
+                or search in (r.get("product_key") or "").lower()]
+
+    try:
+        threshold = float(request.query_params.get("threshold", products.DEFAULT_ALERT_THRESHOLD))
+    except ValueError:
+        threshold = products.DEFAULT_ALERT_THRESHOLD
+    threshold = min(200.0, max(0.0, threshold))
+
+    summary = products.summarise(rows, threshold)
+    options = products.product_options(summary)
+    selection = products.parse_selection(request.query_params.get("selection", ""))
+    if not selection["product_key"] and options:
+        selection = products.parse_selection(options[0]["value"])
+
+    history = products.history_points(rows, selection["product_key"], selection["supplier"])
+    selected_rows = [
+        item for item in summary
+        if item["product_key"] == selection["product_key"]
+        and (not selection["supplier"] or item["supplier"] == selection["supplier"])
+    ]
+    average = (sum(i["average"] for i in selected_rows) / len(selected_rows)) if selected_rows else None
+
+    context = _page_context(request, slug, email, "products")
+    context.update(
+        {
+            "rows": summary,
+            "alert_count": sum(1 for item in summary if item["alert"]),
+            "threshold": threshold,
+            "product_search": request.query_params.get("product", ""),
+            "options": options,
+            "selection": selection,
+            "selection_value": "{}|{}".format(selection["product_key"], selection["supplier"])
+            if selection["supplier"] else selection["product_key"],
+            "selected_label": selected_rows[0]["label"] if selected_rows else "",
+            "history": charts.price_scatter(history, average),
+            "invoices_with_lines": db.count_lines(slug),
+        }
+    )
+    return templates.TemplateResponse("products.html", context)
 
 
 def _reconcile_batch(slug: str, batch: Dict[str, Any]) -> Dict[str, Any]:

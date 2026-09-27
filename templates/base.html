@@ -16,6 +16,7 @@
     <nav class="tabs">
       <a href="/dashboard" class="tab {% if active_tab == 'dashboard' %}is-active{% endif %}">Dashboard</a>
       <a href="/invoices" class="tab {% if active_tab == 'invoices' %}is-active{% endif %}">Invoices</a>
+      <a href="/products" class="tab {% if active_tab == 'products' %}is-active{% endif %}">Products</a>
     </nav>
     <form class="account" method="post" action="/logout">
       <span class="account-email">{{ user_email }}</span>
