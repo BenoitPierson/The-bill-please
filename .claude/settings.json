@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo Rappel de workflow pour The Bill Please : pour toute nouvelle demande, commencer par la phase de reflexion Superpowers (superpowers:brainstorming) puis rediger un plan (superpowers:writing-plans) avant de modifier le code. Pour toute modification d'interface (templates, CSS, JS d'affichage), utiliser la skill emil-design-eng. Chaque modification part d'une nouvelle branche creee depuis origin/main, jamais depuis main directement."
+          }
+        ]
+      }
+    ]
+  }
+}
