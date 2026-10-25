@@ -192,12 +192,10 @@
 
       {% for cell in heatmap.cells %}
       <rect class="heat-cell" x="{{ cell.x }}" y="{{ cell.y }}" width="{{ cell.width }}" height="{{ cell.height }}" rx="3"
-            fill="{{ cell.fill_abs }}"
-            data-fill-abs="{{ cell.fill_abs }}" data-fill-rel="{{ cell.fill_rel }}"
+            fill="{{ cell.fill }}"
             data-label="{{ cell.label }}"
-            data-value-abs="{{ cell.value_abs }} {{ currency }} · {{ cell.count }} facture{{ 's' if cell.count > 1 else '' }}"
-            data-value-rel="{{ cell.value_rel }} du plus gros jour · {{ cell.value_abs }} {{ currency }}">
-        <title>{{ cell.label }} — {{ cell.value_abs }} {{ currency }} ({{ cell.value_rel }} du maximum du fournisseur)</title>
+            data-value-abs="{{ cell.amount_text }} {{ currency }} · {{ cell.count }} facture{{ 's' if cell.count > 1 else '' }}">
+        <title>{{ cell.label }} — {{ cell.amount_text }} {{ currency }}</title>
       </rect>
       {% endfor %}
     </svg>
@@ -209,7 +207,7 @@
       <span class="muted small" data-heat-legend="rel" hidden>0 %</span>
       {% for stop in heatmap.legend %}
       <span class="heat-swatch" style="background: {{ stop.fill }}"
-            title="{{ stop.abs_label }} {{ currency }} / {{ stop.rel_label }}"></span>
+            title="{{ stop.abs_label }} {{ currency }}"></span>
       {% endfor %}
       <span class="muted small" data-heat-legend="abs">{{ heatmap.legend[-1].abs_label }} {{ currency }}</span>
       <span class="muted small" data-heat-legend="rel" hidden>100 %</span>
