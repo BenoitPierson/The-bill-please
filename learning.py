@@ -23,7 +23,7 @@ import db
 
 logger = logging.getLogger("uvicorn.error")
 
-RULE_MODEL = "claude-sonnet-5"
+RULE_MODEL = "claude-haiku-5-5"
 MAX_RULE_CHARS = 400
 MAX_RULES_IN_PROMPT = 60
 

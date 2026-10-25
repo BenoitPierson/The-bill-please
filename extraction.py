@@ -16,7 +16,7 @@ import fitz  # PyMuPDF
 from PIL import Image
 from anthropic import Anthropic
 
-MODEL = "claude-sonnet-5"
+MODEL = "claude-haiku-5-5"
 PDF_RENDER_DPI = 150
 MAX_IMAGE_LONG_EDGE = 2000  # caps token cost for large phone photos
 MAX_PAGES_PER_INVOICE = 5
