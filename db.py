@@ -931,8 +931,16 @@ def count_uncertain(slug: str) -> int:
         ).fetchone()["n"]
 
 
-def heatmap_rows(slug: str) -> List[Dict[str, Any]]:
-    """Per (day, supplier): amount, invoice count and the invoice numbers involved."""
+def heatmap_rows(slug: str, currency: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Per (day, supplier): amount, invoice count and the invoice numbers involved.
+
+    Restricted to one currency when given, so a day total never adds KES to USD.
+    """
+    params: List[Any] = []
+    currency_clause = ""
+    if currency is not None:
+        currency_clause = " AND IFNULL(currency, '') = ?"
+        params.append(currency)
     with connect(slug) as conn:
         rows = conn.execute(
             """
@@ -943,9 +951,10 @@ def heatmap_rows(slug: str) -> List[Dict[str, Any]]:
                    GROUP_CONCAT(NULLIF(invoice_number, ''), char(31)) AS numbers
             FROM invoices
             WHERE error IS NULL AND {}
-              AND supplier_name IS NOT NULL AND supplier_name != ''
+              AND supplier_name IS NOT NULL AND supplier_name != ''{}
             GROUP BY day, supplier ORDER BY day
-            """.format(_VALID_DAY)
+            """.format(_VALID_DAY, currency_clause),
+            params,
         ).fetchall()
     return [
         {

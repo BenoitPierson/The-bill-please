@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from anthropic import Anthropic
@@ -28,6 +28,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 import auth
 import charts
+import dashboard as homepage
 import db
 import learning
 import pipeline
@@ -333,30 +334,83 @@ def _require_login(request: Request):
     return slug, email, None
 
 
+def _today() -> date:
+    """The server's date; isolated so tests can pin it."""
+    return date.today()
+
+
+def _home_context(slug: str, today: date) -> Dict[str, Any]:
+    """Everything the home page shows. No filters: it is always the whole workspace."""
+    # Big figure: the last complete month, in its main currency. Other currencies
+    # are listed beside it, never added to it.
+    year, month = homepage.last_complete_month(today)
+    month_period = homepage.period(year, month)
+    month_rows = db.totals_by_currency(slug, month_period, month_period)
+    month_currency = homepage.main_currency(month_rows)
+    main_row = next((r for r in month_rows if r["currency"] == month_currency), None)
+    headline = {
+        "month_label": homepage.month_name(year, month),
+        "empty": main_row is None,
+        "amount_text": charts.format_amount(main_row["amount"]) if main_row else "",
+        "currency": month_currency or "",
+        "others": [
+            {"amount_text": charts.format_amount(r["amount"]), "currency": r["currency"] or "devise inconnue"}
+            for r in sorted(month_rows, key=lambda r: -float(r["amount"]))
+            if r is not main_row
+        ],
+        "invoice_count": sum(int(r["invoice_count"]) for r in month_rows),
+    }
+
+    # Evolution: up to 12 months ending with the current one, in the main
+    # currency of that window. Leading empty months are dropped; the current
+    # month always keeps its place.
+    window = homepage.month_window(today)
+    window_rows = db.totals_by_currency(slug, window[0], window[-1])
+    series_currency = homepage.main_currency(window_rows)
+    series: List[Dict[str, Any]] = []
+    if series_currency is not None:
+        series = db.monthly_series(slug, window, series_currency)
+        while len(series) > 1 and series[0]["invoice_count"] == 0:
+            series.pop(0)
+    other_currencies = sorted(
+        {r["currency"] for r in window_rows if r["currency"] and r["currency"] != series_currency}
+    )
+
+    batch = db.latest_batch(slug)
+    last_batch = None
+    if batch is not None:
+        batch = _reconcile_batch(slug, batch)
+        last_batch = db.batch_summary(slug, batch["id"])
+        if batch["status"] == "running":
+            last_batch["done"] = batch["done"]
+            last_batch["progress"] = pipeline.batch_progress(batch["id"], batch)
+
+    alerts = homepage.top_price_alerts(
+        products.summarise(db.product_lines(slug, {}), products.DEFAULT_ALERT_THRESHOLD)
+    )
+
+    return {
+        "headline": headline,
+        "uncertain_count": db.count_uncertain(slug),
+        "series_currency": series_currency or "",
+        "monthly": charts.monthly_columns(series, current_period=window[-1]),
+        "monthly_other_currencies": other_currencies,
+        "last_batch": last_batch,
+        "alerts": alerts,
+        "alert_threshold": products.DEFAULT_ALERT_THRESHOLD,
+        "heatmap": charts.daily_heatmap(db.heatmap_rows(slug, series_currency)),
+        "recent": db.latest_invoices(slug),
+    }
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request) -> Response:
     slug, email, redirect = _require_login(request)
     if redirect is not None:
         return redirect
 
-    filters = _filters_from(request)
-    stats = db.dashboard_stats(slug, filters)
-
-    # Amounts are summed as stored; when several currencies are mixed the
-    # template warns instead of silently presenting a meaningless total.
-    currencies = stats["currencies"]
-    currency_label = currencies[0]["currency"] if currencies else ""
-
     context = _page_context(request, slug, email, "dashboard")
-    context.update(
-        {
-            "stats": stats,
-            "currency_label": currency_label,
-            "monthly": charts.monthly_columns(stats["by_month"]),
-            "suppliers_chart": charts.supplier_bars(stats["by_supplier"]),
-            "heatmap": charts.daily_heatmap(stats["by_day_supplier"]),
-        }
-    )
+    context.update(_home_context(slug, _today()))
     return templates.TemplateResponse("dashboard.html", context)
 
 

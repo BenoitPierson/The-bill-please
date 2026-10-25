@@ -1,225 +1,199 @@
 {% extends "base.html" %}
-{% block title %}Dashboard{% endblock %}
+{% block title %}Tableau de bord{% endblock %}
 
 {% block content %}
 <div class="page-head">
-  <div>
-    <h1>Dashboard</h1>
-    <p class="page-sub">
-      {% if filters.supplier or filters.date_from or filters.date_to %}
-        Vue filtree — <a href="/dashboard">voir tout</a>
-      {% else %}
-        Vue d'ensemble des factures fournisseurs
-      {% endif %}
+  <h1>Tableau de bord</h1>
+</div>
+
+<div class="home-grid">
+
+  <!-- Last complete month + monthly evolution ------------------------------->
+  <section class="card home-total" aria-labelledby="totalLabel">
+    <p class="eyebrow" id="totalLabel">Total facturé · {{ headline.month_label }}</p>
+    {% if headline.empty %}
+      <p class="home-empty-figure">Aucune facture en {{ headline.month_label }}</p>
+    {% else %}
+      <p class="home-figure">
+        {{ headline.amount_text }}<span class="home-unit">{{ headline.currency }}</span>
+        {% for other in headline.others %}
+        <span class="chip" title="Non additionné au total : autre devise">+ {{ other.amount_text }} {{ other.currency }}</span>
+        {% endfor %}
+      </p>
+    {% endif %}
+    <p class="home-facts">
+      {{ headline.invoice_count }} facture{{ 's' if headline.invoice_count > 1 else '' }} en {{ headline.month_label.split(' ')[0] }}
+      · <a href="/invoices?status=uncertain">{{ uncertain_count }} à vérifier</a>
     </p>
+
+    {% if not monthly.empty %}
+    <svg class="chart home-chart" viewBox="0 0 {{ monthly.width }} {{ monthly.height }}" role="img"
+         aria-label="Montant facturé par mois, en {{ series_currency }}">
+      {% for line in monthly.gridlines %}
+      <line class="grid" x1="{{ monthly.left }}" y1="{{ line.y }}" x2="{{ monthly.right }}" y2="{{ line.y }}"/>
+      <text class="axis-text" x="{{ monthly.left - 10 }}" y="{{ line.y + 4 }}" text-anchor="end">{{ line.label }}</text>
+      {% endfor %}
+      {% for bar in monthly.bars %}
+      <g class="bar-group{% if bar.is_current %} is-current{% endif %}{% if bar.show_value %} is-peak{% endif %}" data-label="{{ bar.label }}{% if bar.is_current %} (en cours){% endif %}"
+         data-value=" · {{ bar.amount_text }} {{ series_currency }} · {{ bar.count }} facture{{ 's' if bar.count > 1 else '' }}">
+        <rect class="hit" x="{{ bar.center - 16 }}" y="18" width="32" height="{{ monthly.baseline - 18 }}"/>
+        <rect class="bar" x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}" rx="{{ bar.radius }}"/>
+        <rect class="bar-foot" x="{{ bar.x }}" y="{{ monthly.baseline - bar.radius }}" width="{{ bar.width }}" height="{{ bar.radius }}"/>
+        {% if bar.show_value %}
+        <text class="value-text" x="{{ bar.center }}" y="{{ bar.y - 8 }}" text-anchor="middle">{{ bar.value_text }}</text>
+        {% endif %}
+        {% if bar.show_label or bar.is_current %}
+        <text class="axis-text{% if bar.is_current %} current-text{% endif %}" x="{{ bar.center }}" y="{{ monthly.baseline + 18 }}" text-anchor="middle">{{ 'en cours' if bar.is_current else bar.label }}</text>
+        {% endif %}
+      </g>
+      {% endfor %}
+      <line class="baseline" x1="{{ monthly.left }}" y1="{{ monthly.baseline }}" x2="{{ monthly.right }}" y2="{{ monthly.baseline }}"/>
+    </svg>
+    <p class="hint small">
+      Montants en {{ series_currency }}, sur les 12 derniers mois au plus.
+      {% if monthly_other_currencies %}Non inclus : {{ monthly_other_currencies | join(', ') }}.{% endif %}
+    </p>
+    {% endif %}
+  </section>
+
+  <div class="home-side">
+    <!-- Last import ---------------------------------------------------------->
+    <section class="card" aria-labelledby="importTitle">
+      <h2 id="importTitle">Dernier import</h2>
+      {% if not last_batch %}
+        <p class="muted">Aucun import pour l'instant.</p>
+        <a class="btn btn-primary" href="/invoices">Importer des factures</a>
+      {% elif last_batch.progress %}
+        <div class="import-live" data-batch-progress="{{ last_batch.batch_id }}" data-total="{{ last_batch.total }}">
+          <p class="import-counts"><span data-batch-done>{{ last_batch.done }}</span> / {{ last_batch.total }} traitées</p>
+          <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="{{ last_batch.total }}" aria-valuenow="{{ last_batch.done }}">
+            <i data-batch-bar style="transform: scaleX({{ (last_batch.done / last_batch.total) if last_batch.total else 0 }})"></i>
+          </div>
+          <p class="muted small">{{ last_batch.label }} · en cours</p>
+        </div>
+      {% else %}
+        <p class="import-counts">
+          <span>{{ last_batch.succeeded }} intégrée{{ 's' if last_batch.succeeded > 1 else '' }}</span>
+          <span>{{ last_batch.duplicates }} doublon{{ 's' if last_batch.duplicates > 1 else '' }}</span>
+          {% if last_batch.failed %}<span class="signal">{{ last_batch.failed }} erreur{{ 's' if last_batch.failed > 1 else '' }}</span>{% endif %}
+        </p>
+        <p class="muted small">
+          {{ last_batch.label }} · {{ 'interrompu' if last_batch.status == 'interrupted' else 'terminé' }}
+          {% if last_batch.finished_at %}le {{ last_batch.finished_at[8:10] }}/{{ last_batch.finished_at[5:7] }}{% endif %}
+        </p>
+        <a class="small" href="/invoices?batch={{ last_batch.batch_id }}">Voir ce lot</a>
+      {% endif %}
+    </section>
+
+    <!-- Price alerts --------------------------------------------------------->
+    <section class="card" aria-labelledby="alertsTitle">
+      <h2 id="alertsTitle">Alertes de prix</h2>
+      {% if alerts %}
+      <ul class="alert-list">
+        {% for item in alerts %}
+        <li>
+          <span class="alert-name">{{ item.label }}<span class="muted"> · {{ item.supplier }}</span></span>
+          <b class="signal">+{{ '%.0f' % item.drift }}&nbsp;%</b>
+        </li>
+        {% endfor %}
+      </ul>
+      <a class="small" href="/products">Voir les produits</a>
+      {% else %}
+      <p class="muted">Aucune hausse au-delà de {{ alert_threshold }}&nbsp;%.</p>
+      {% endif %}
+    </section>
   </div>
 </div>
 
-<!-- Period / supplier filter ------------------------------------------------>
-<form class="card filters" method="get" action="/dashboard">
-  <label class="field">
-    <span>Fournisseur</span>
-    <select name="supplier">
-      <option value="">Tous</option>
-      {% for supplier in suppliers %}
-      <option value="{{ supplier }}" {% if filters.supplier == supplier %}selected{% endif %}>{{ supplier }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label class="field">
-    <span>Du</span>
-    <input type="date" name="date_from" value="{{ filters.date_from }}">
-  </label>
-  <label class="field">
-    <span>Au</span>
-    <input type="date" name="date_to" value="{{ filters.date_to }}">
-  </label>
-  <div class="filter-actions">
-    <button type="submit" class="btn btn-primary">Appliquer</button>
-    <a href="/dashboard" class="btn btn-ghost">Reinitialiser</a>
-  </div>
-</form>
-
-{% set totals = stats.totals %}
-{% set currency = currency_label %}
-
-<!-- KPIs -------------------------------------------------------------------->
-<section class="kpi-row">
-  <div class="card kpi kpi-hero">
-    <span class="kpi-label">Total facture</span>
-    <span class="kpi-hero-value">{{ totals.total_amount | amount }}</span>
-    <span class="kpi-unit">{{ currency }}</span>
-  </div>
-  <div class="card kpi">
-    <span class="kpi-label">Factures</span>
-    <span class="kpi-value">{{ totals.invoice_count }}</span>
-  </div>
-  <div class="card kpi">
-    <span class="kpi-label">TVA cumulee</span>
-    <span class="kpi-value">{{ totals.vat_amount | compact }}</span>
-    <span class="kpi-unit">{{ currency }}</span>
-  </div>
-  <div class="card kpi">
-    <span class="kpi-label">Fournisseurs</span>
-    <span class="kpi-value">{{ totals.supplier_count }}</span>
-  </div>
-  <div class="card kpi">
-    <span class="kpi-label">A verifier</span>
-    <span class="kpi-value">{{ totals.uncertain_count or 0 }}</span>
-    <a class="kpi-link" href="/invoices?status=uncertain">Voir</a>
-  </div>
-  <div class="card kpi">
-    <span class="kpi-label">En erreur</span>
-    <span class="kpi-value">{{ totals.error_count or 0 }}</span>
-    <a class="kpi-link" href="/invoices?status=errors">Voir</a>
-  </div>
-</section>
-
-{% if stats.currencies | length > 1 %}
-<p class="alert alert-warn">
-  Plusieurs devises sont presentes ({% for c in stats.currencies %}{{ c.currency }} ({{ c.n }}){% if not loop.last %}, {% endif %}{% endfor %}).
-  Les totaux ci-dessus additionnent des montants de devises differentes : filtre par
-  fournisseur pour obtenir un total homogene.
-</p>
-{% endif %}
-
-<!-- Monthly amounts --------------------------------------------------------->
-<section class="card chart-card">
+<!-- Day x supplier heatmap ----------------------------------------------------->
+<section class="card" aria-labelledby="heatTitle">
   <header class="chart-head">
-    <h2>Montant facture par mois</h2>
-    <span class="chart-sub">Somme des montants, en {{ currency }}</span>
-  </header>
-
-  {% if monthly.empty %}
-  <p class="empty">Aucune facture datee sur la periode.</p>
-  {% else %}
-  <svg class="chart" viewBox="0 0 {{ monthly.width }} {{ monthly.height }}" role="img"
-       aria-label="Montant facture par mois">
-    {% for line in monthly.gridlines %}
-    <line class="grid" x1="{{ monthly.left }}" y1="{{ line.y }}" x2="{{ monthly.right }}" y2="{{ line.y }}"/>
-    <text class="axis-text" x="{{ monthly.left - 10 }}" y="{{ line.y + 4 }}" text-anchor="end">{{ line.label }}</text>
-    {% endfor %}
-
-    {% for bar in monthly.bars %}
-    <g class="bar-group" data-label="{{ bar.label }}"
-       data-value="{{ bar.amount_text }} {{ currency }} · {{ bar.count }} facture{{ 's' if bar.count > 1 else '' }}">
-      <rect class="hit" x="{{ bar.center - 16 }}" y="18" width="32" height="{{ monthly.baseline - 18 }}"/>
-      <rect class="bar" x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}"
-            rx="{{ bar.radius }}"/>
-      <rect class="bar-foot" x="{{ bar.x }}" y="{{ monthly.baseline - bar.radius }}"
-            width="{{ bar.width }}" height="{{ bar.radius }}"/>
-      {% if bar.show_value %}
-      <text class="value-text" x="{{ bar.center }}" y="{{ bar.y - 8 }}" text-anchor="middle">{{ bar.value_text }}</text>
-      {% endif %}
-      {% if bar.show_label %}
-      <text class="axis-text" x="{{ bar.center }}" y="{{ monthly.baseline + 18 }}" text-anchor="middle">{{ bar.label }}</text>
-      {% endif %}
-    </g>
-    {% endfor %}
-
-    <line class="baseline" x1="{{ monthly.left }}" y1="{{ monthly.baseline }}"
-          x2="{{ monthly.right }}" y2="{{ monthly.baseline }}"/>
-  </svg>
-  {% endif %}
-</section>
-
-<!-- Top suppliers ----------------------------------------------------------->
-<section class="card chart-card">
-  <header class="chart-head">
-    <h2>Principaux fournisseurs</h2>
-    <span class="chart-sub">Top {{ suppliers_chart.bars | length }} par montant cumule, en {{ currency }}</span>
-  </header>
-
-  {% if suppliers_chart.empty %}
-  <p class="empty">Aucun fournisseur identifie sur la periode.</p>
-  {% else %}
-  <svg class="chart" viewBox="0 0 {{ suppliers_chart.width }} {{ suppliers_chart.height }}" role="img"
-       aria-label="Principaux fournisseurs par montant">
-    {% for bar in suppliers_chart.bars %}
-    <g class="bar-group" data-label="{{ bar.name }}"
-       data-value="{{ bar.amount_text }} {{ currency }} · {{ bar.count }} facture{{ 's' if bar.count > 1 else '' }}">
-      <rect class="hit" x="0" y="{{ bar.y - 6 }}" width="{{ suppliers_chart.width }}" height="{{ bar.height + 12 }}"/>
-      <text class="row-label" x="{{ suppliers_chart.label_width }}" y="{{ bar.text_y }}" text-anchor="end">{{ bar.name_short }}</text>
-      <rect class="bar" x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}"
-            rx="{{ bar.radius }}"/>
-      <rect class="bar-foot" x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.radius }}" height="{{ bar.height }}"/>
-      <text class="value-text" x="{{ bar.value_x }}" y="{{ bar.text_y }}">{{ bar.value_text }}</text>
-    </g>
-    {% endfor %}
-  </svg>
-  {% endif %}
-</section>
-
-<!-- Day x supplier heatmap -------------------------------------------------->
-<section class="card chart-card" id="heatmapCard" data-mode="abs">
-  <header class="chart-head chart-head-split">
-    <div>
-      <h2>Montant par jour et par fournisseur</h2>
-      <span class="chart-sub">
-        {% if heatmap.empty %}
-          Aucune facture datee sur la periode.
-        {% else %}
-          <span data-heat-sub="abs">Montant facture, en {{ currency }} — du vert (faible) au rouge (maximum : {{ heatmap.max_amount_text }})</span>
-          <span data-heat-sub="rel" hidden>Part du plus gros jour de chaque fournisseur — du vert (0 %) au rouge (100 %)</span>
-        {% endif %}
-      </span>
-    </div>
+    <h2 id="heatTitle">Par jour et par fournisseur</h2>
     {% if not heatmap.empty %}
-    <div class="toggle" role="group" aria-label="Echelle de la heatmap">
-      <button type="button" class="toggle-btn is-active" data-heat-mode="abs" aria-pressed="true">Valeur absolue</button>
-      <button type="button" class="toggle-btn" data-heat-mode="rel" aria-pressed="false">Valeur relative</button>
-    </div>
+    <span class="chart-sub">Montants en {{ series_currency }}, du vert (faible) au rouge (maximum : {{ heatmap.max_amount_text }}). Survolez une case pour le détail.</span>
     {% endif %}
   </header>
-
   {% if heatmap.empty %}
-  <p class="empty">Aucune facture datee sur la periode.</p>
+  <p class="empty">Aucune facture datée pour l'instant.</p>
   {% else %}
   <div class="heat-scroll">
     <svg class="chart heat" width="{{ heatmap.width }}" height="{{ heatmap.height }}"
          viewBox="0 0 {{ heatmap.width }} {{ heatmap.height }}" role="img"
-         aria-label="Montant facture par jour et par fournisseur">
+         aria-label="Montant facturé par jour et par fournisseur">
       {% for month in heatmap.months %}
       <text class="axis-text heat-month" x="{{ month.x }}" y="{{ heatmap.month_baseline }}">{{ month.label }}</text>
       {% endfor %}
       {% for tick in heatmap.day_ticks %}
       <text class="axis-text" x="{{ tick.x }}" y="{{ heatmap.day_baseline }}" text-anchor="middle">{{ tick.label }}</text>
       {% endfor %}
-
       {% for row in heatmap.rows %}
       <text class="row-label" x="{{ heatmap.label_width - 10 }}" y="{{ row.text_y }}" text-anchor="end">{{ row.name_short }}</text>
       {% endfor %}
-
       {% for cell in heatmap.cells %}
       <rect class="heat-cell" x="{{ cell.x }}" y="{{ cell.y }}" width="{{ cell.width }}" height="{{ cell.height }}" rx="3"
             fill="{{ cell.fill }}"
-            data-label="{{ cell.label }}"
-            data-value-abs="{{ cell.amount_text }} {{ currency }} · {{ cell.count }} facture{{ 's' if cell.count > 1 else '' }}">
-        <title>{{ cell.label }} — {{ cell.amount_text }} {{ currency }}</title>
+            data-date="{{ cell.date_text }}" data-supplier="{{ cell.supplier }}"
+            data-amount="{{ cell.amount_text }} {{ series_currency }}" data-count="{{ cell.count }}"
+            data-numbers="{{ cell.numbers | join(', ') }}"
+            data-day-total="{{ cell.day_total_text }} {{ series_currency }}" data-share="{{ cell.month_share_text }}">
+        <title>{{ cell.label }} — {{ cell.amount_text }} {{ series_currency }}</title>
       </rect>
       {% endfor %}
     </svg>
   </div>
-
   <footer class="heat-foot">
     <div class="heat-legend">
-      <span class="muted small" data-heat-legend="abs">0</span>
-      <span class="muted small" data-heat-legend="rel" hidden>0 %</span>
-      {% for stop in heatmap.legend %}
-      <span class="heat-swatch" style="background: {{ stop.fill }}"
-            title="{{ stop.abs_label }} {{ currency }}"></span>
-      {% endfor %}
-      <span class="muted small" data-heat-legend="abs">{{ heatmap.legend[-1].abs_label }} {{ currency }}</span>
-      <span class="muted small" data-heat-legend="rel" hidden>100 %</span>
+      <span class="muted small">0</span>
+      {% for stop in heatmap.legend %}<span class="heat-swatch" style="background: {{ stop.fill }}" title="{{ stop.abs_label }} {{ series_currency }}"></span>{% endfor %}
+      <span class="muted small">{{ heatmap.legend[-1].abs_label }} {{ series_currency }}</span>
     </div>
-    <p class="hint heat-note">
-      {{ heatmap.supplier_count }} fournisseur{{ 's' if heatmap.supplier_count > 1 else '' }}
-      sur {{ heatmap.day_count }} jour{{ 's' if heatmap.day_count > 1 else '' }} factures.
-      {% if heatmap.hidden_suppliers %}{{ heatmap.hidden_suppliers }} fournisseur{{ 's' if heatmap.hidden_suppliers > 1 else '' }} de plus petit volume non affiche{{ 's' if heatmap.hidden_suppliers > 1 else '' }}.{% endif %}
-      {% if heatmap.hidden_days %}Seuls les {{ heatmap.day_count }} jours les plus recents sont affiches.{% endif %}
-      Affine avec les filtres ci-dessus.
+    {% if heatmap.hidden_suppliers or heatmap.hidden_days %}
+    <p class="hint small heat-note">
+      {% if heatmap.hidden_suppliers %}{{ heatmap.hidden_suppliers }} fournisseur{{ 's' if heatmap.hidden_suppliers > 1 else '' }} de plus petit volume non affiché{{ 's' if heatmap.hidden_suppliers > 1 else '' }}.{% endif %}
+      {% if heatmap.hidden_days %}Seuls les {{ heatmap.day_count }} jours les plus récents sont affichés.{% endif %}
     </p>
+    {% endif %}
   </footer>
+  {% endif %}
+</section>
+
+<!-- Three latest imported invoices --------------------------------------------->
+<section class="card" aria-labelledby="recentTitle">
+  <header class="chart-head chart-head-split">
+    <h2 id="recentTitle">Dernières factures importées</h2>
+    <a class="small" href="/invoices">Tout voir</a>
+  </header>
+  {% if recent %}
+  <div class="table-scroll">
+  <table class="data-table recent-table">
+    <thead>
+      <tr><th>Fournisseur</th><th>Numéro</th><th>Date</th><th class="num">Montant</th></tr>
+    </thead>
+    <tbody>
+      {% for row in recent %}
+      <tr{% if row.stored_name %} class="is-link" data-href="/invoices/{{ row.id }}/file"{% endif %}>
+        {% for field in ('supplier_name', 'invoice_number', 'invoice_date') %}
+        <td class="cell{% if field in row.uncertain_fields %} is-uncertain{% endif %}{% if field in row.edited_fields %} is-edited{% endif %}">
+          {% if field == 'invoice_number' and row.stored_name %}
+          <a href="/invoices/{{ row.id }}/file" target="_blank" rel="noopener">{{ row.invoice_number or row.filename }}</a>
+          {% elif field == 'supplier_name' and not row.supplier_name %}<span class="muted">{{ row.filename }}</span>
+          {% else %}{{ row[field] or '—' }}{% endif %}
+        </td>
+        {% endfor %}
+        <td class="cell num{% if 'total_amount' in row.uncertain_fields %} is-uncertain{% endif %}{% if 'total_amount' in row.edited_fields %} is-edited{% endif %}">
+          {% if row.error %}<span class="signal">Erreur</span>{% elif row.total_amount is not none %}{{ row.total_amount | amount }}&nbsp;{{ row.currency or '' }}{% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="legend small">
+    <span class="swatch swatch-uncertain"></span>à vérifier
+    <span class="swatch swatch-edited"></span>corrigé à la main
+  </p>
+  {% else %}
+  <p class="empty">Aucune facture importée. <a href="/invoices">Importer des factures</a></p>
   {% endif %}
 </section>
 

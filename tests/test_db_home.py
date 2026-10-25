@@ -62,3 +62,10 @@ def test_latest_batch_none_then_most_recent(tenant):
     db.create_batch(tenant, "a.zip", 1)
     second = db.create_batch(tenant, "b.zip", 1)
     assert db.latest_batch(tenant)["id"] == second
+
+
+def test_heatmap_rows_can_be_restricted_to_one_currency(tenant):
+    add(tenant, supplier_name="Bidco", invoice_date="2026-09-03", total_amount=5.0, currency="KES")
+    add(tenant, supplier_name="Bidco", invoice_date="2026-09-03", total_amount=900.0, currency="USD")
+    (row,) = db.heatmap_rows(tenant, "KES")
+    assert row["amount"] == 5.0
