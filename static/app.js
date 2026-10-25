@@ -7,6 +7,16 @@
   const $ = (selector, root) => (root || document).querySelector(selector);
   const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
 
+  /* ------------------------------------------------- top bar scroll edge */
+
+  // The bar is translucent; its edge appears only once content slides under it.
+  const topbar = $("#topbar");
+  if (topbar) {
+    const syncEdge = () => topbar.classList.toggle("is-scrolled", window.scrollY > 4);
+    window.addEventListener("scroll", syncEdge, { passive: true });
+    syncEdge();
+  }
+
   /* ------------------------------------------------------------- import */
 
   const importPanel = $("#importPanel");
