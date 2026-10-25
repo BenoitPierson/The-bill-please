@@ -728,6 +728,10 @@
         if (data.status !== "running") { window.location.reload(); return; }
         $("[data-batch-done]", liveImport).textContent = String(data.done);
         $("[data-batch-bar]", liveImport).style.transform = `scaleX(${total ? data.done / total : 0})`;
+        const eta = Number(data.eta_seconds) || 0;
+        $("[data-batch-eta]", liveImport).textContent = eta < 60
+          ? "moins d'une minute restante"
+          : `environ ${Math.ceil(eta / 60)} min restantes`;
         setTimeout(tick, 2000);
       } catch (error) {
         setTimeout(tick, 5000);

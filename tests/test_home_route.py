@@ -73,3 +73,23 @@ def test_home_has_no_filters_and_no_scale_toggle(client, tenant):
     page = client.get("/dashboard").text
     assert 'name="date_from"' not in page
     assert "data-heat-mode" not in page
+
+
+def test_heatmap_never_mixes_currencies_when_window_is_empty(client, tenant):
+    # Everything is older than the 12-month window: the heatmap must still pick one currency.
+    add(tenant, supplier_name="Bidco", invoice_date="2024-03-05", total_amount=1000.0, currency="KES")
+    add(tenant, supplier_name="Bidco", invoice_date="2024-03-05", total_amount=5.0, currency="USD")
+    page = client.get("/dashboard").text
+    assert charts.format_amount(1005.0) not in page
+    assert "Montants en KES" in page
+
+
+def test_running_import_shows_time_remaining(client, tenant):
+    import pipeline
+    batch_id = db.create_batch(tenant, "mars.zip", 10)
+    pipeline._active_batches[batch_id] = pipeline._BatchState(tenant)
+    try:
+        page = client.get("/dashboard").text
+    finally:
+        pipeline._active_batches.pop(batch_id, None)
+    assert "data-batch-eta" in page and "restant" in page

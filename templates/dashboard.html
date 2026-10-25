@@ -69,7 +69,8 @@
           <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="{{ last_batch.total }}" aria-valuenow="{{ last_batch.done }}">
             <i data-batch-bar style="transform: scaleX({{ (last_batch.done / last_batch.total) if last_batch.total else 0 }})"></i>
           </div>
-          <p class="muted small">{{ last_batch.label }} · en cours</p>
+          {% set eta = last_batch.progress.eta_seconds or 0 %}
+          <p class="muted small">{{ last_batch.label }} · <span data-batch-eta>{% if eta < 60 %}moins d'une minute restante{% else %}environ {{ ((eta + 59) // 60) | int }} min restantes{% endif %}</span></p>
         </div>
       {% else %}
         <p class="import-counts">
@@ -110,7 +111,7 @@
   <header class="chart-head">
     <h2 id="heatTitle">Par jour et par fournisseur</h2>
     {% if not heatmap.empty %}
-    <span class="chart-sub">Montants en {{ series_currency }}, du vert (faible) au rouge (maximum : {{ heatmap.max_amount_text }}). Survolez une case pour le détail.</span>
+    <span class="chart-sub">Montants en {{ heatmap_currency }}, du vert (faible) au rouge (maximum : {{ heatmap.max_amount_text }}). Survolez une case pour le détail.</span>
     {% endif %}
   </header>
   {% if heatmap.empty %}
@@ -133,10 +134,10 @@
       <rect class="heat-cell" x="{{ cell.x }}" y="{{ cell.y }}" width="{{ cell.width }}" height="{{ cell.height }}" rx="3"
             fill="{{ cell.fill }}"
             data-date="{{ cell.date_text }}" data-supplier="{{ cell.supplier }}"
-            data-amount="{{ cell.amount_text }} {{ series_currency }}" data-count="{{ cell.count }}"
+            data-amount="{{ cell.amount_text }} {{ heatmap_currency }}" data-count="{{ cell.count }}"
             data-numbers="{{ cell.numbers | join(', ') }}"
-            data-day-total="{{ cell.day_total_text }} {{ series_currency }}" data-share="{{ cell.month_share_text }}">
-        <title>{{ cell.label }} — {{ cell.amount_text }} {{ series_currency }}</title>
+            data-day-total="{{ cell.day_total_text }} {{ heatmap_currency }}" data-share="{{ cell.month_share_text }}">
+        <title>{{ cell.label }} — {{ cell.amount_text }} {{ heatmap_currency }}</title>
       </rect>
       {% endfor %}
     </svg>
@@ -144,8 +145,8 @@
   <footer class="heat-foot">
     <div class="heat-legend">
       <span class="muted small">0</span>
-      {% for stop in heatmap.legend %}<span class="heat-swatch" style="background: {{ stop.fill }}" title="{{ stop.abs_label }} {{ series_currency }}"></span>{% endfor %}
-      <span class="muted small">{{ heatmap.legend[-1].abs_label }} {{ series_currency }}</span>
+      {% for stop in heatmap.legend %}<span class="heat-swatch" style="background: {{ stop.fill }}" title="{{ stop.abs_label }} {{ heatmap_currency }}"></span>{% endfor %}
+      <span class="muted small">{{ heatmap.legend[-1].abs_label }} {{ heatmap_currency }}</span>
     </div>
     {% if heatmap.hidden_suppliers or heatmap.hidden_days %}
     <p class="hint small heat-note">

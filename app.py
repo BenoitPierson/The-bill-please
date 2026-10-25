@@ -385,6 +385,12 @@ def _home_context(slug: str, today: date) -> Dict[str, Any]:
             last_batch["done"] = batch["done"]
             last_batch["progress"] = pipeline.batch_progress(batch["id"], batch)
 
+    # The heatmap follows the series currency; with nothing in the window it
+    # falls back to the workspace's main currency, never to "all of them".
+    heatmap_currency = series_currency
+    if heatmap_currency is None:
+        heatmap_currency = homepage.main_currency(db.totals_by_currency(slug, "0000-01", "9999-12"))
+
     alerts = homepage.top_price_alerts(
         products.summarise(db.product_lines(slug, {}), products.DEFAULT_ALERT_THRESHOLD)
     )
@@ -398,7 +404,8 @@ def _home_context(slug: str, today: date) -> Dict[str, Any]:
         "last_batch": last_batch,
         "alerts": alerts,
         "alert_threshold": products.DEFAULT_ALERT_THRESHOLD,
-        "heatmap": charts.daily_heatmap(db.heatmap_rows(slug, series_currency)),
+        "heatmap_currency": heatmap_currency or "",
+        "heatmap": charts.daily_heatmap(db.heatmap_rows(slug, heatmap_currency)),
         "recent": db.latest_invoices(slug),
     }
 
