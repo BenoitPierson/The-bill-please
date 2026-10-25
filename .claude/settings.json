@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo Rappel de workflow pour The Bill Please, dans cet ordre strict : 1) avant toute modification, lancer la phase de reflexion superpowers:brainstorming et clarifier le besoin avec l'utilisateur ; 2) rediger un plan (superpowers:writing-plans) et le faire valider avant tout code ; 3) seulement ensuite ecrire le code, pour une modification d'interface utiliser la skill emil-design-eng ; 4) chaque modification part d'une nouvelle branche creee depuis origin/main, jamais depuis main directement."
+          }
+        ]
+      }
+    ]
+  }
+}
