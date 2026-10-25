@@ -14,7 +14,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 import tenants
 
@@ -839,3 +839,121 @@ def dashboard_stats(slug: str, filters: Dict[str, Any]) -> Dict[str, Any]:
         "by_day_supplier": [dict(r) for r in by_day_supplier],
         "currencies": [dict(r) for r in currencies if r["currency"]],
     }
+
+
+# ----------------------------------------------------------------------------- home
+# Queries behind the home page. All of them ignore failed extractions (no
+# trustworthy amount) and dates that are not well-formed ISO strings.
+
+_VALID_MONTH = "invoice_date IS NOT NULL AND length(invoice_date) >= 7 AND substr(invoice_date, 5, 1) = '-'"
+_VALID_DAY = "invoice_date IS NOT NULL AND length(invoice_date) = 10 AND substr(invoice_date, 5, 1) = '-'"
+
+
+def totals_by_currency(slug: str, first_period: str, last_period: str) -> List[Dict[str, Any]]:
+    """Amount and invoice count per currency between two YYYY-MM periods (inclusive)."""
+    with connect(slug) as conn:
+        rows = conn.execute(
+            """
+            SELECT IFNULL(currency, '') AS currency,
+                   IFNULL(SUM(total_amount), 0) AS amount,
+                   COUNT(*) AS invoice_count
+            FROM invoices
+            WHERE error IS NULL AND {}
+              AND substr(invoice_date, 1, 7) BETWEEN ? AND ?
+            GROUP BY IFNULL(currency, '')
+            """.format(_VALID_MONTH),
+            (first_period, last_period),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def monthly_series(slug: str, periods: Sequence[str], currency: Optional[str]) -> List[Dict[str, Any]]:
+    """One row per requested period, zero-filled, optionally restricted to one currency."""
+    if not periods:
+        return []
+    params: List[Any] = [periods[0], periods[-1]]
+    currency_clause = ""
+    if currency is not None:
+        currency_clause = " AND IFNULL(currency, '') = ?"
+        params.append(currency)
+    with connect(slug) as conn:
+        found = {
+            r["period"]: r
+            for r in conn.execute(
+                """
+                SELECT substr(invoice_date, 1, 7) AS period,
+                       IFNULL(SUM(total_amount), 0) AS amount,
+                       COUNT(*) AS invoice_count
+                FROM invoices
+                WHERE error IS NULL AND {} AND substr(invoice_date, 1, 7) BETWEEN ? AND ?{}
+                GROUP BY period
+                """.format(_VALID_MONTH, currency_clause),
+                params,
+            ).fetchall()
+        }
+    return [
+        {
+            "period": p,
+            "amount": float(found[p]["amount"]) if p in found else 0.0,
+            "invoice_count": int(found[p]["invoice_count"]) if p in found else 0,
+        }
+        for p in periods
+    ]
+
+
+def latest_batch(slug: str) -> Optional[Dict[str, Any]]:
+    with connect(slug) as conn:
+        row = conn.execute(
+            "SELECT * FROM batches ORDER BY started_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def latest_invoices(slug: str, limit: int = 3) -> List[Dict[str, Any]]:
+    """The most recently imported invoices, newest first."""
+    with connect(slug) as conn:
+        rows = conn.execute(
+            "SELECT * FROM invoices ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
+        ).fetchall()
+    result = []
+    for row in rows:
+        data = dict(row)
+        data["uncertain_fields"] = json.loads(data.get("uncertain_fields") or "[]")
+        data["edited_fields"] = json.loads(data.get("edited_fields") or "[]")
+        result.append(data)
+    return result
+
+
+def count_uncertain(slug: str) -> int:
+    with connect(slug) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM invoices WHERE error IS NULL AND uncertain_fields != '[]'"
+        ).fetchone()["n"]
+
+
+def heatmap_rows(slug: str) -> List[Dict[str, Any]]:
+    """Per (day, supplier): amount, invoice count and the invoice numbers involved."""
+    with connect(slug) as conn:
+        rows = conn.execute(
+            """
+            SELECT invoice_date AS day,
+                   supplier_name AS supplier,
+                   IFNULL(SUM(total_amount), 0) AS amount,
+                   COUNT(*) AS invoice_count,
+                   GROUP_CONCAT(NULLIF(invoice_number, ''), char(31)) AS numbers
+            FROM invoices
+            WHERE error IS NULL AND {}
+              AND supplier_name IS NOT NULL AND supplier_name != ''
+            GROUP BY day, supplier ORDER BY day
+            """.format(_VALID_DAY)
+        ).fetchall()
+    return [
+        {
+            "day": r["day"],
+            "supplier": r["supplier"],
+            "amount": float(r["amount"]),
+            "invoice_count": int(r["invoice_count"]),
+            "invoice_numbers": [n for n in (r["numbers"] or "").split("\x1f") if n],
+        }
+        for r in rows
+    ]
