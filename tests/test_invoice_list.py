@@ -49,3 +49,24 @@ def test_invoices_page_has_no_duplicates_panel_and_keeps_sort_in_pagination(clie
     page = client.get("/invoices?sort=amount_asc&status=ok").text
     assert "doublons" not in page.lower()
     assert "sort=amount_asc" in page and "page=2" in page
+
+
+def test_page_lists_rows_with_state_and_has_detail_pane(client, tenant):
+    add(tenant, supplier_name="Bidco", uncertain_fields=["invoice_number"])
+    add(tenant, filename="scan_0.pdf", error="Erreur API : x")
+    page = client.get("/invoices").text
+    assert 'data-state="uncertain"' in page and 'data-state="error"' in page
+    assert 'id="detailPane"' in page and 'id="viewer"' in page and 'id="docModal"' not in page
+    assert "scan_0.pdf" in page
+
+
+def test_status_links_keep_other_filters(client, tenant):
+    add(tenant, supplier_name="Bidco")
+    page = client.get("/invoices?supplier=Bidco&sort=amount_desc").text
+    assert "status=uncertain" in page and "supplier=Bidco" in page and "sort=amount_desc" in page
+
+
+def test_empty_list_offers_to_reset_filters(client, tenant):
+    add(tenant, supplier_name="Bidco")
+    page = client.get("/invoices?search=introuvable").text
+    assert "Aucune facture ne correspond" in page and 'href="/invoices"' in page

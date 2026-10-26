@@ -681,3 +681,141 @@ tr:hover .price-doc, .price-doc:focus, .price-doc:hover { opacity: 1; }
 .table-scroll { overflow-x: auto; }
 .recent-table td { padding: 10px 8px; }
 .recent-table .muted { font-size: .8125rem; }
+
+/* --------------------------------------------------------------- invoices */
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.visually-hidden-focusable:not(:focus) {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0);
+}
+.signal-link { color: var(--apricot); }
+.page-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* Import: a sheet anchored under its button, closing back into it. */
+.import-anchor { position: relative; }
+.import-sheet {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 30;
+  width: min(440px, calc(100vw - 32px)); margin: 0;
+  transform-origin: top right;
+  box-shadow: 0 1px 2px rgba(27, 40, 48, .06), 0 12px 32px rgba(27, 40, 48, .12);
+  transition: opacity 180ms var(--ease-out), transform 180ms var(--ease-out);
+}
+@starting-style { .import-sheet { opacity: 0; transform: scale(0.97) translateY(-4px); } }
+.storage-line { display: flex; align-items: center; gap: 10px; margin: 12px 0 0; }
+.storage-line .storage-track { display: inline-block; width: 120px; }
+.storage-line .storage-fill { display: block; transform-origin: left; }
+
+/* Toolbar: status segments, search and compact pills. */
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: center; margin-bottom: 16px; }
+.seg-control { display: flex; gap: 2px; padding: 3px; border-radius: 11px; background: var(--grid); }
+.seg-item {
+  padding: 6px 12px; border-radius: 8px; color: var(--ink-secondary); text-decoration: none;
+  font-weight: 500; white-space: nowrap; transition: background-color 150ms ease, color 150ms ease;
+}
+.seg-item.is-active { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(27, 40, 48, .08); }
+.seg-count { color: var(--ink-muted); font-weight: 500; margin-left: 4px; }
+.toolbar-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; flex: 1; min-width: 0; }
+.search-field { flex: 1; min-width: 200px; }
+.search-field input, .pill-field select, .pill-field > summary {
+  font: inherit; width: 100%; padding: 7px 12px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+}
+.pill-field select { width: auto; border-radius: 999px; padding-right: 28px; color: var(--ink-secondary); }
+.pill-field > summary { list-style: none; cursor: pointer; border-radius: 999px; color: var(--ink-secondary); white-space: nowrap; }
+.pill-field > summary::-webkit-details-marker { display: none; }
+.period { position: relative; }
+.period[data-active] > summary { color: var(--series-1-ink); background: var(--series-1-tint); }
+.period-pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 25; display: flex; gap: 10px; align-items: flex-end;
+  padding: 14px; background: var(--surface); border-radius: 12px; border: 1px solid var(--border);
+  box-shadow: 0 12px 32px rgba(27, 40, 48, .12); transform-origin: top left;
+}
+.period-pop .field { margin: 0; }
+
+/* List and detail side by side. */
+.review-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 20px; align-items: start; }
+.review-grid .card { margin-bottom: 0; }
+.list-card { padding: 6px 8px 10px; }
+.invoice-list { min-width: 0; width: 100%; table-layout: auto; }
+.invoice-list td { padding: 11px 10px; }
+.invoice-list th { padding: 10px; }
+.invoice-list tbody tr { cursor: pointer; }
+.invoice-list tbody tr:focus-visible { outline: 2px solid var(--series-1); outline-offset: -2px; }
+.invoice-list tbody tr[aria-selected="true"] td { background: var(--series-1-tint); }
+@media (hover: hover) and (pointer: fine) {
+  .invoice-list tbody tr[aria-selected="false"]:hover td { background: var(--plane); }
+}
+.list-supplier { min-width: 0; overflow-wrap: anywhere; }
+.state-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; background: var(--series-1-soft); }
+[data-state="uncertain"] .state-dot { background: var(--uncertain-edge); }
+[data-state="edited"] .state-dot { background: var(--edited-edge); }
+[data-state="error"] .state-dot { background: var(--apricot); }
+.empty-card .empty { margin: 8px 0; }
+
+.detail-pane { position: sticky; top: 76px; padding: 18px 20px; display: grid; gap: 14px; }
+.detail-pane[data-empty] .detail-fields, .detail-pane[data-empty] .detail-actions { display: none; }
+.detail-head { display: flex; align-items: flex-start; gap: 12px; }
+.detail-id { flex: 1; min-width: 0; }
+.detail-id h2 { overflow-wrap: anywhere; }
+.detail-id p { margin: 2px 0 0; overflow-wrap: anywhere; }
+.detail-nav { display: flex; gap: 2px; align-items: center; }
+.detail-back { display: none; }
+.viewer { height: min(56vh, 540px); border-radius: 10px; background: var(--plane); }
+.detail-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.detail-field {
+  position: relative; display: grid; gap: 2px; padding: 7px 10px 8px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--surface);
+}
+.detail-field label { font-size: .6875rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-muted); }
+.detail-input { font: inherit; border: 0; padding: 0; background: transparent; color: var(--ink); min-width: 0; }
+.detail-input:focus { outline: none; }
+.detail-field:focus-within { border-color: var(--series-1); box-shadow: 0 0 0 1px var(--series-1); }
+.detail-field.is-uncertain { background: var(--uncertain); border-color: var(--uncertain-edge); }
+.detail-field.is-edited { background: var(--edited); border-color: var(--edited-edge); }
+.detail-field.is-failed { border-color: var(--critical); }
+.detail-field.is-saving { opacity: .7; }
+.confirm-btn { position: absolute; top: 6px; right: 6px; padding: 2px 9px; font-size: .75rem; }
+.detail-notes { margin: 0; color: var(--ink-secondary); font-size: .8125rem; }
+.detail-actions { display: flex; align-items: center; gap: 12px; }
+#detailError { margin: 0; }
+
+/* Learned rules: a side sheet over a dimming scrim. */
+.sheet { position: fixed; inset: 0; z-index: 50; }
+.sheet-backdrop { position: absolute; inset: 0; background: rgba(27, 40, 48, .28); transition: opacity 200ms ease; }
+@starting-style { .sheet-backdrop { opacity: 0; } }
+.sheet-body {
+  position: absolute; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); overflow-y: auto;
+  background: var(--surface); padding: 22px max(22px, env(safe-area-inset-right, 0px)) 22px 22px;
+  box-shadow: -12px 0 32px rgba(27, 40, 48, .12);
+  transition: transform 240ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+@starting-style { .sheet-body { transform: translateX(100%); } }
+.sheet-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet-body, .import-sheet { transition: opacity 150ms ease; }
+  @starting-style { .sheet-body { transform: none; opacity: 0; } .import-sheet { transform: none; } }
+}
+
+/* Phones: the list alone; a tapped invoice opens full screen. */
+@media (max-width: 900px) {
+  .review-grid { grid-template-columns: minmax(0, 1fr); }
+  .detail-pane { display: none; }
+  .detail-pane.is-open {
+    display: grid; position: fixed; inset: 0; z-index: 40; border-radius: 0; overflow-y: auto;
+    padding: calc(14px + env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px))
+             calc(20px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+  }
+  .detail-back { display: inline-block; }
+  .viewer { height: 52vh; }
+  .detail-fields { grid-template-columns: minmax(0, 1fr); }
+  .search-field { flex-basis: 100%; min-width: 0; }
+  .toolbar-form { flex-basis: 100%; }
+  .pill-field { min-width: 0; max-width: 100%; }
+  .pill-field select { max-width: 100%; }
+  .period { flex-basis: 100%; }
+  .period-pop { position: static; flex-wrap: wrap; margin-top: 8px; box-shadow: none; }
+}
