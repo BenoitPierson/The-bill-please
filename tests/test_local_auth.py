@@ -14,8 +14,8 @@ def make_client(tenant, monkeypatch):
     monkeypatch.setattr(tenants, "DEFAULT_TENANT", tenant)
     monkeypatch.setattr(tenants, "APP_DOMAIN", "")
 
-    def build(base_url):
-        return TestClient(app_module.app, base_url=base_url)
+    def build(base_url, client_ip="127.0.0.1"):
+        return TestClient(app_module.app, base_url=base_url, client=(client_ip, 50000))
     return build
 
 
@@ -55,3 +55,9 @@ def test_local_corrections_are_attributed_to_the_local_post(make_client, tenant)
     assert response.status_code == 200
     (correction,) = db.pending_corrections(tenant)
     assert correction["user_email"] == "Poste local"
+
+
+def test_spoofed_local_host_from_another_computer_still_requires_login(make_client):
+    # The Host header is chosen by the caller; the connection's own address is not.
+    client = make_client("http://127.0.0.1:8000", client_ip="192.168.1.20")
+    assert client.get("/dashboard", follow_redirects=False).status_code == 303

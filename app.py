@@ -150,12 +150,17 @@ LOCAL_IDENTITY = "Poste local"
 def local_mode(request: Request) -> bool:
     """True when the login step is skipped: a purely local run.
 
-    Both conditions are required. No APP_DOMAIN means the platform is not
-    deployed, and a loopback Host means the page is requested from this very
-    machine. As soon as either changes (a production domain, another computer
-    on the network), the normal login comes back on its own.
+    All conditions are required. No APP_DOMAIN means the platform is not
+    deployed; the connection must come from this very machine (its peer
+    address — the Host header alone is chosen by the caller and can be faked);
+    and the Host must be a loopback name too. As soon as one changes (a
+    production domain, another computer on the network), the normal login
+    comes back on its own.
     """
     if tenants.APP_DOMAIN:
+        return False
+    peer = request.client.host if request.client else ""
+    if peer not in ("127.0.0.1", "::1"):
         return False
     host = (request.headers.get("host") or "").strip().lower()
     if host.startswith("["):  # IPv6 literal: [::1]:8000

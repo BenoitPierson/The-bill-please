@@ -322,7 +322,8 @@ Checked by the security suite; breaking one of these is a vulnerability, not a r
   host's *and* one whose account no longer exists; `/login` clears the session before
   setting it, and `auth` locks an email+IP after `FAILURES_BEFORE_LOCK` failures.
 - **The login step is skipped only for a purely local run** (`app.local_mode`): no
-  `APP_DOMAIN` *and* a loopback `Host` (`127.0.0.1`, `localhost`, `::1`). Requests are then
+  `APP_DOMAIN`, a loopback peer address (`request.client.host`, which the caller cannot
+  forge — the `Host` header alone can be) *and* a loopback `Host`. Requests are then
   attributed to `LOCAL_IDENTITY` ("Poste local") and `/login` / `/setup` redirect home.
   Both conditions are required — never widen this to "no APP_DOMAIN" alone, or any
   computer on the network reaching the port would see every invoice.
