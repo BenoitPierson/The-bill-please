@@ -83,6 +83,24 @@
       render();
     });
 
+    // Files dropped anywhere on the page open the import sheet with them.
+    const carriesFiles = (event) =>
+      event.dataTransfer && Array.from(event.dataTransfer.types || []).includes("Files");
+    document.addEventListener("dragover", (event) => { if (carriesFiles(event)) event.preventDefault(); });
+    document.addEventListener("drop", (event) => {
+      if (!carriesFiles(event) || dropzone.contains(event.target)) return;
+      event.preventDefault();
+      importPanel.hidden = false;
+      files = files.concat(Array.from(event.dataTransfer.files));
+      render();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !importPanel.hidden) {
+        importPanel.hidden = true;
+        $("#importBtn").focus();
+      }
+    });
+
     startBtn.addEventListener("click", async () => {
       startBtn.disabled = true;
       statusEl.textContent = "Envoi des fichiers...";
@@ -279,141 +297,6 @@
     setTimeout(() => banner.remove(), 5000);
   }
 
-  /* ------------------------------------------------------ document modal */
-
-  // The original is shown next to the extracted fields, which can be corrected
-  // in place: checking a value against the document is why it gets opened.
-  const modal = $("#docModal");
-  if (modal) {
-    const frame = $("#docFrame");
-    const title = $("#docTitle");
-    const openLink = $("#docOpen");
-    const prevBtn = $("#docPrev");
-    const nextBtn = $("#docNext");
-    const position = $("#docPosition");
-    const errorEl = $("#docError");
-    const notesWrap = $("#docNotesWrap");
-    const notes = $("#docNotes");
-    const inputs = $$(".doc-input", modal);
-
-    // Previous/next walk through the invoices of the table, in its order.
-    const tableIds = $$("#invoiceTable .view-doc").map((button) => button.dataset.id);
-    let currentId = null;
-
-    // Keep the table in step with a correction made in the panel.
-    function syncTable(invoiceId, field, value) {
-      const input = $(`#invoiceTable tr[data-id="${CSS.escape(invoiceId)}"] .cell-input[data-field="${field}"]`);
-      if (!input) return;
-      input.value = value;
-      input.dataset.original = value;
-      input.title = value;
-      const cell = input.closest(".cell");
-      cell.classList.remove("is-uncertain", "is-failed");
-      cell.classList.add("is-edited");
-      cell.title = "Champ corrige a la main";
-    }
-
-    inputs.forEach((input) => {
-      const holder = input.closest(".doc-field");
-      // The id is read when the save starts, so an edit still pending while
-      // the user moves to the next invoice lands on the right one.
-      let savingId = null;
-      input.addEventListener("focus", () => { savingId = currentId; });
-      bindEditing(input, () => savingId || currentId, holder, (value, invoiceId) => {
-        syncTable(invoiceId, input.dataset.field, value);
-        if (invoiceId === currentId) holder.querySelector(".doc-state").textContent = " · corrige";
-      });
-    });
-
-    function fillFields(data) {
-      inputs.forEach((input) => {
-        const field = input.dataset.field;
-        const value = data[field] == null ? "" : String(data[field]);
-        const holder = input.closest(".doc-field");
-        input.value = value;
-        input.dataset.original = value;
-        input.dataset.invoice = data.id;
-        input.disabled = false;
-        const uncertain = data.uncertain_fields.indexOf(field) > -1;
-        const edited = data.edited_fields.indexOf(field) > -1;
-        holder.classList.remove("is-saving", "is-failed");
-        holder.classList.toggle("is-uncertain", uncertain);
-        holder.classList.toggle("is-edited", edited);
-        holder.title = "";
-        holder.querySelector(".doc-state").textContent =
-          edited ? " · corrige" : uncertain ? " · a verifier" : "";
-      });
-      errorEl.hidden = !data.error;
-      errorEl.textContent = data.error || "";
-      notesWrap.hidden = !data.extraction_notes;
-      notes.textContent = data.extraction_notes || "";
-    }
-
-    async function show(invoiceId, name) {
-      if (document.activeElement && modal.contains(document.activeElement)) {
-        document.activeElement.blur();  // saves a pending edit first
-      }
-      currentId = invoiceId;
-      const url = `/invoices/${encodeURIComponent(invoiceId)}/file`;
-      frame.src = url;
-      openLink.href = url;
-      title.textContent = name || "";
-      modal.hidden = false;
-
-      const index = tableIds.indexOf(invoiceId);
-      prevBtn.hidden = nextBtn.hidden = index === -1;
-      prevBtn.disabled = index <= 0;
-      nextBtn.disabled = index === -1 || index >= tableIds.length - 1;
-      position.textContent = index > -1 ? `${index + 1} / ${tableIds.length}` : "";
-
-      inputs.forEach((input) => {
-        input.disabled = true;
-        input.value = "";
-        input.dataset.invoice = "";
-        input.closest(".doc-field").classList.remove("is-uncertain", "is-edited", "is-saving", "is-failed");
-      });
-      errorEl.hidden = true;
-      notesWrap.hidden = true;
-      try {
-        const response = await fetch(`/api/invoices/${encodeURIComponent(invoiceId)}`);
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Facture introuvable");
-        if (currentId !== invoiceId) return;  // user already moved on
-        title.textContent = data.filename.split("/").pop();
-        fillFields(data);
-      } catch (error) {
-        errorEl.hidden = false;
-        errorEl.textContent = error.message;
-      }
-    }
-
-    const step = (offset) => {
-      const index = tableIds.indexOf(currentId) + offset;
-      if (index < 0 || index >= tableIds.length) return;
-      const button = $(`#invoiceTable .view-doc[data-id="${CSS.escape(tableIds[index])}"]`);
-      show(tableIds[index], button ? button.dataset.name : "");
-    };
-    prevBtn.addEventListener("click", () => step(-1));
-    nextBtn.addEventListener("click", () => step(1));
-
-    $$(".view-doc").forEach((button) => {
-      button.addEventListener("click", () => show(button.dataset.id, button.dataset.name));
-    });
-
-    const close = () => {
-      if (document.activeElement && modal.contains(document.activeElement)) {
-        document.activeElement.blur();
-      }
-      modal.hidden = true;
-      frame.src = "about:blank";
-      currentId = null;
-    };
-    $$("[data-close]", modal).forEach((element) => element.addEventListener("click", close));
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !modal.hidden) close();
-    });
-  }
-
   /* --------------------------------------------------------------- rules */
 
   const learnBtn = $("#learnBtn");
@@ -497,7 +380,7 @@
     // rows below carry the exact numbers (colour is never the only cue).
     const outcomes = [
       { key: "succeeded", label: "Integrees avec succes", value: data.succeeded, tone: "good" },
-      { key: "duplicates", label: "Doublons ignores (non integres)", value: data.duplicates, tone: "neutral" },
+      { key: "duplicates", label: "Deja importes (non integres)", value: data.duplicates, tone: "neutral" },
       { key: "failed", label: "Non integrees : erreur", value: data.failed, tone: "critical" },
       { key: "not_processed", label: "Non traitees (import interrompu)", value: data.not_processed, tone: "muted" },
     ];
@@ -564,10 +447,10 @@
     }
 
     if (data.duplicate_examples.length) {
-      const section = el("section", "summary-section");
-      section.appendChild(el("h3", "summary-h3", "Doublons ignores"));
+      const section = el("section", "summary-section summary-error");
+      section.appendChild(el("h3", "summary-h3", "Fichiers deja importes"));
       section.appendChild(el("p", "summary-note",
-        "Documents identiques, au bit pres, a une facture deja presente : ni stockes, ni envoyes a l'extraction, ni comptes dans les totaux."));
+        "Ces fichiers sont identiques a des factures deja presentes : ils n'ont pas ete integres, ni comptes dans les totaux."));
       const items = el("ul", "summary-files");
       data.duplicate_examples.forEach((dup) => {
         const item = el("li");
@@ -578,11 +461,8 @@
       });
       section.appendChild(items);
       if (data.duplicates > data.duplicate_examples.length) {
-        const more = el("a", "summary-more", `Voir les ${data.duplicates} doublons`);
-        more.href = "/invoices#doublons";
-        more.dataset.summaryLink = "";
-        more.dataset.summaryAnchor = "";
-        section.appendChild(more);
+        section.appendChild(el("p", "summary-note",
+          `et ${plural(data.duplicates - data.duplicate_examples.length, "autre fichier")} deja importe(s).`));
       }
       content.appendChild(section);
     }
@@ -633,25 +513,7 @@
     document.addEventListener("keydown", onKey);
     // Following a link from the summary also counts as having seen it.
     $$("[data-summary-link], #summaryPrimary", summaryModal).forEach((link) => {
-      link.onclick = async (event) => {
-        // A link to an anchor of the page we are already on changes nothing on
-        // its own: the browser jumps without reloading, so the modal stays up
-        // and the panel never opens. Reload so the page comes back with the
-        // rows this import just added, and opens the panel on arrival. The
-        // test is "is the panel on this page", not the route, so it holds
-        // wherever the panel is rendered.
-        if ("summaryAnchor" in link.dataset && $("#doublons")) {
-          event.preventDefault();
-          // Wait for the acknowledgement: reloading first would race it, and
-          // the page would come back with the summary still pending — the
-          // pop-up would reopen on top of the panel the user just asked for.
-          await acknowledge(batchId);
-          window.location.hash = "doublons";
-          window.location.reload();
-          return;
-        }
-        acknowledge(batchId);
-      };
+      link.onclick = () => { acknowledge(batchId); };
     });
   }
 
@@ -661,16 +523,573 @@
     showImportSummary(document.body.dataset.pendingSummary);
   }
 
-  // The duplicates panel can be linked to directly from the summary — on
-  // arrival, and also when the hash changes while the page stays put.
-  function openDuplicates() {
-    if (window.location.hash !== "#doublons") return;
-    const panel = $("#doublons");
-    if (panel) { panel.open = true; panel.scrollIntoView({ block: "start" }); }
+  /* ---------------------------------------------------- invoices toolbar */
+
+  // Choosing a supplier or a sort order applies it at once.
+  $$("select[data-autosubmit]").forEach((select) => {
+    select.addEventListener("change", () => select.form.submit());
+  });
+
+  /* ------------------------------------------------- learned rules sheet */
+
+  const rulesPanel = $("#rulesPanel");
+  const rulesBtn = $("#rulesBtn");
+  if (rulesPanel && rulesBtn) {
+    const closeRules = () => {
+      if (rulesPanel.hidden) return;
+      rulesPanel.hidden = true;
+      rulesBtn.setAttribute("aria-expanded", "false");
+      rulesBtn.focus();
+    };
+    rulesBtn.addEventListener("click", () => {
+      rulesPanel.hidden = false;
+      rulesBtn.setAttribute("aria-expanded", "true");
+      const close = $("[data-sheet-close].btn", rulesPanel);
+      if (close) close.focus();
+    });
+    $$("[data-sheet-close]", rulesPanel).forEach((node) => node.addEventListener("click", closeRules));
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeRules(); });
   }
 
-  openDuplicates();
-  window.addEventListener("hashchange", openDuplicates);
+  /* ------------------------------------------------------ invoice detail */
+
+  // The list on the left, the selected invoice on the right: its document,
+  // its fields (corrected in place through saveField, so every correction
+  // still feeds the learning loop) and the confirm / validate actions.
+  const invoiceList = $("#invoiceList");
+  const detailPane = $("#detailPane");
+  if (invoiceList && detailPane) {
+    const rows = $$("tbody tr[data-id]", invoiceList);
+    const inputs = $$(".detail-input", detailPane);
+    const validateBtn = $("#validateBtn");
+    const statusLine = $("#detailStatus");
+    const amountFormat = new Intl.NumberFormat("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    let currentId = null;
+    let current = null;
+    let loadToken = 0;
+
+    const rowFor = (id) => rows.find((row) => row.dataset.id === id);
+    const stateOf = (data) => data.error ? "error"
+      : data.uncertain_fields.length ? "uncertain"
+      : data.edited_fields.length ? "edited" : "ok";
+    const baseName = (name) => (name || "").split("/").pop();
+
+    function announce(text) { statusLine.textContent = text || ""; }
+
+    // Keep the list row in step with what the detail shows.
+    function syncRow(data) {
+      const row = rowFor(data.id);
+      if (!row) return;
+      row.dataset.state = stateOf(data);
+      const [supplierCell, dateCell, amountCell] = row.cells;
+      const label = supplierCell.querySelector(".visually-hidden");
+      supplierCell.textContent = "";
+      supplierCell.appendChild(el("span", "state-dot"));
+      supplierCell.appendChild(data.supplier_name
+        ? document.createTextNode(" " + data.supplier_name)
+        : el("span", "muted", " " + baseName(data.filename)));
+      if (label) supplierCell.appendChild(label);
+      dateCell.textContent = data.invoice_date || "—";
+      const amount = data.total_amount == null || data.total_amount === "" ? null : Number(data.total_amount);
+      amountCell.textContent = amount == null || Number.isNaN(amount)
+        ? "—" : `${amountFormat.format(amount)} ${data.currency || ""}`;
+    }
+
+    function emitRegions(data) {
+      detailPane.dispatchEvent(new CustomEvent("invoice:regions", {
+        detail: { id: data.id, regions: data.uncertain_regions || [] },
+      }));
+    }
+
+    function renderDetail(data) {
+      current = data;
+      detailPane.removeAttribute("data-empty");
+      $("#detailTitle").textContent =
+        [data.supplier_name || baseName(data.filename), data.invoice_number].filter(Boolean).join(" · ");
+      $("#detailMeta").textContent = [baseName(data.filename), data.archive].filter(Boolean).join(" · ");
+      const openLink = $("#detailOpen");
+      openLink.hidden = !data.has_file;
+      openLink.href = `/invoices/${encodeURIComponent(data.id)}/file`;
+      const errorEl = $("#detailError");
+      errorEl.hidden = !data.error;
+      errorEl.textContent = data.error || "";
+      const notes = $("#detailNotes");
+      notes.hidden = !data.extraction_notes;
+      notes.textContent = data.extraction_notes || "";
+      renderFields(data);
+      announce("");
+    }
+
+    function renderFields(data) {
+      inputs.forEach((input) => {
+        const field = input.dataset.field;
+        const holder = input.closest(".detail-field");
+        const value = data[field] == null ? "" : String(data[field]);
+        if (document.activeElement !== input || input.dataset.invoice !== data.id) {
+          input.value = value;
+          input.dataset.original = value;
+        }
+        input.dataset.invoice = data.id;
+        input.readOnly = false;
+        const doubtful = data.uncertain_fields.includes(field);
+        holder.classList.toggle("is-uncertain", doubtful);
+        holder.classList.toggle("is-edited", data.edited_fields.includes(field));
+        holder.classList.remove("is-failed");
+        const confirm = $("[data-confirm]", holder);
+        confirm.hidden = !doubtful || Boolean(data.error);
+      });
+      validateBtn.hidden = !data.uncertain_fields.length || Boolean(data.error);
+      syncRow(data);
+    }
+
+    async function select(id, options) {
+      const opts = options || {};
+      const row = rowFor(id) || rows[0];
+      if (!row) return;
+      rows.forEach((r) => r.setAttribute("aria-selected", r === row ? "true" : "false"));
+      currentId = row.dataset.id;
+      const url = new URL(window.location.href);
+      url.searchParams.set("id", currentId);
+      window.history.replaceState(null, "", url);
+      row.scrollIntoView({ block: "nearest" });
+      if (opts.focusRow) row.focus({ preventScroll: true });
+      if (opts.open) detailPane.classList.add("is-open");
+
+      // Until the new invoice arrives the fields still show the previous one:
+      // lock them so nothing typed now can be saved under the wrong id.
+      inputs.forEach((input) => { input.readOnly = true; });
+      const token = ++loadToken;
+      try {
+        const response = await fetch(`/api/invoices/${encodeURIComponent(currentId)}`);
+        if (!response.ok) throw new Error("Facture introuvable");
+        const data = await response.json();
+        if (token !== loadToken) return; // the user already moved on
+        renderDetail(data);
+        detailPane.dispatchEvent(new CustomEvent("invoice:selected", { detail: { id: data.id, data } }));
+      } catch (error) {
+        if (token === loadToken) {
+          inputs.forEach((input) => { input.readOnly = !current; });
+          announce(error.message);
+        }
+      }
+    }
+
+    function step(delta, options) {
+      const index = rows.findIndex((row) => row.dataset.id === currentId);
+      const next = rows[Math.min(rows.length - 1, Math.max(0, index + delta))];
+      if (next && next.dataset.id !== currentId) select(next.dataset.id, options);
+    }
+
+    rows.forEach((row) => {
+      row.addEventListener("click", () => select(row.dataset.id, { open: true }));
+      row.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") select(row.dataset.id, { open: true });
+      });
+    });
+    $("#detailPrev").addEventListener("click", () => step(-1));
+    $("#detailNext").addEventListener("click", () => step(1));
+    $("#detailBack").addEventListener("click", () => {
+      detailPane.classList.remove("is-open");
+      const row = rowFor(currentId);
+      if (row) row.focus({ preventScroll: true });
+    });
+    // Arrow keys walk the list — instantly: a keyboard action is never animated.
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      if (event.target.closest("input, select, textarea, [contenteditable], .viewer")) return;
+      if (!$("#rulesPanel") || !$("#rulesPanel").hidden) return;
+      event.preventDefault();
+      step(event.key === "ArrowDown" ? 1 : -1, { focusRow: true });
+    });
+
+    inputs.forEach((input) => {
+      const holder = input.closest(".detail-field");
+      // The id is captured when editing starts, from the invoice the field is
+      // showing (not the one being loaded), so a save lands on the invoice
+      // whose value was typed over.
+      let savingId = null;
+      input.addEventListener("focus", () => {
+        savingId = input.dataset.invoice || null;
+        detailPane.dispatchEvent(new CustomEvent("region:focus", { detail: { field: input.dataset.field } }));
+      });
+      input.addEventListener("mouseenter", () => {
+        detailPane.dispatchEvent(new CustomEvent("region:focus", { detail: { field: input.dataset.field } }));
+      });
+      bindEditing(input, () => savingId || input.dataset.invoice, holder, (value, invoiceId) => {
+        if (!current || invoiceId !== current.id) return;
+        const field = input.dataset.field;
+        current[field] = value;
+        current.uncertain_fields = current.uncertain_fields.filter((f) => f !== field);
+        current.uncertain_regions = (current.uncertain_regions || []).filter((r) => r.field !== field);
+        if (!current.edited_fields.includes(field)) current.edited_fields.push(field);
+        renderFields(current);
+        emitRegions(current);
+      });
+    });
+
+    async function review(path, body) {
+      if (!current) return;
+      const invoiceId = current.id;
+      announce("Enregistrement…");
+      try {
+        const response = await fetch(`/api/invoices/${encodeURIComponent(invoiceId)}/${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body || {}),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Enregistrement refuse");
+        if (data.learned && data.learned.rules_updated) {
+          flash(`L'automate a mis a jour ${data.learned.rules_updated} regle(s) d'extraction.`);
+        }
+        if (!current || current.id !== invoiceId) return;
+        current.uncertain_fields = data.uncertain_fields;
+        current.uncertain_regions = data.uncertain_regions;
+        renderFields(current);
+        emitRegions(current);
+        announce(path === "validate" ? "Facture validée." : "Champ confirmé.");
+      } catch (error) {
+        announce(error.message);
+      }
+    }
+
+    $$("[data-confirm]", detailPane).forEach((button) => {
+      button.addEventListener("click", () => review("confirm", { field: button.dataset.confirm }));
+    });
+    validateBtn.addEventListener("click", () => review("validate"));
+
+    const wanted = new URL(window.location.href).searchParams.get("id");
+    select(wanted && rowFor(wanted) ? wanted : rows[0] && rows[0].dataset.id);
+  }
+
+  /* ------------------------------------------------------------- viewer */
+
+  // The original as page images, with the doubtful areas drawn on top. One
+  // transform (translate + scale) moves the page and its boxes together, so
+  // the boxes — placed in percentages of the page — never need recomputing.
+  // Every motion starts from the value on screen and can be grabbed mid-way.
+  const viewerStage = $("#viewerStage");
+  if (viewerStage && detailPane) {
+    const canvas = $("#viewerCanvas");
+    const image = $("#viewerImage");
+    const layer = $("#viewerRegions");
+    const emptyEl = $("#viewerEmpty");
+    const pageLabel = $("#pageLabel");
+    const zoomLabel = $("#zoomLevel");
+    const doubtBtn = $("#nextDoubt");
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const MIN_ZOOM = 0.5;
+    const MAX_ZOOM = 4;
+
+    const view = { id: null, pages: 0, page: 1, regions: [], width: 0, height: 0, fit: 1, z: 1, tx: 0, ty: 0 };
+    let doubtIndex = -1;
+    let animation = null;
+
+    const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+    const stageSize = () => ({ w: viewerStage.clientWidth, h: viewerStage.clientHeight });
+    const scale = () => view.fit * view.z;
+
+    function apply() {
+      canvas.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${scale()})`;
+      zoomLabel.textContent = `${Math.round(view.z * 100)} %`;
+    }
+
+    // Where the page may rest: centred when smaller than the stage, edge to
+    // edge otherwise.
+    function bounds(z) {
+      const { w, h } = stageSize();
+      const cw = view.width * view.fit * z;
+      const ch = view.height * view.fit * z;
+      return {
+        minX: cw <= w ? (w - cw) / 2 : w - cw, maxX: cw <= w ? (w - cw) / 2 : 0,
+        minY: ch <= h ? (h - ch) / 2 : h - ch, maxY: ch <= h ? (h - ch) / 2 : 0,
+      };
+    }
+
+    // Past an edge the page follows less and less (Apple's rubber band).
+    function rubberband(overshoot, dimension) {
+      const c = 0.55;
+      return (overshoot * dimension * c) / (dimension + c * Math.abs(overshoot));
+    }
+    function soft(value, low, high, dimension) {
+      if (value < low) return low - rubberband(low - value, dimension);
+      if (value > high) return high + rubberband(value - high, dimension);
+      return value;
+    }
+
+    function stop() {
+      if (animation) cancelAnimationFrame(animation);
+      animation = null;
+    }
+
+    // Critically damped spring (no overshoot), from the values on screen.
+    function animateTo(target) {
+      stop();
+      if (reduceMotion.matches) {
+        Object.assign(view, target);
+        apply();
+        return;
+      }
+      const omega = (2 * Math.PI) / 0.35;
+      const from = { z: view.z, tx: view.tx, ty: view.ty };
+      const start = performance.now();
+      const frame = (now) => {
+        const t = (now - start) / 1000;
+        const decay = (1 + omega * t) * Math.exp(-omega * t);
+        ["z", "tx", "ty"].forEach((key) => {
+          view[key] = target[key] + (from[key] - target[key]) * decay;
+        });
+        apply();
+        if (decay > 0.001) {
+          animation = requestAnimationFrame(frame);
+        } else {
+          Object.assign(view, target);
+          apply();
+          animation = null;
+        }
+      };
+      animation = requestAnimationFrame(frame);
+    }
+
+    function settled(z) {
+      const b = bounds(z);
+      return { z, tx: clamp(view.tx, b.minX, b.maxX), ty: clamp(view.ty, b.minY, b.maxY) };
+    }
+
+    function zoomAround(newZ, px, py, animate) {
+      const z = clamp(newZ, MIN_ZOOM, MAX_ZOOM);
+      const cx = (px - view.tx) / scale();
+      const cy = (py - view.ty) / scale();
+      const target = { z, tx: px - cx * view.fit * z, ty: py - cy * view.fit * z };
+      const b = bounds(z);
+      target.tx = clamp(target.tx, b.minX, b.maxX);
+      target.ty = clamp(target.ty, b.minY, b.maxY);
+      if (animate) animateTo(target);
+      else { stop(); Object.assign(view, target); apply(); }
+    }
+
+    function fitPage(animate) {
+      const target = { z: 1, tx: 0, ty: 0 };
+      const b = bounds(1);
+      target.tx = b.minX;
+      target.ty = b.minY;
+      if (animate) animateTo(target);
+      else { Object.assign(view, target); apply(); }
+    }
+
+    function measure() {
+      const { w, h } = stageSize();
+      if (!view.width || !w) return;
+      view.fit = Math.min(w / view.width, h / view.height);
+      canvas.style.width = `${view.width}px`;
+      canvas.style.height = `${view.height}px`;
+    }
+
+    function drawRegions() {
+      layer.textContent = "";
+      view.regions.forEach((region, index) => {
+        if (region.page !== view.page) return;
+        const box = el("div", "region");
+        box.dataset.field = region.field;
+        box.dataset.index = String(index);
+        box.style.left = `${region.x * 100}%`;
+        box.style.top = `${region.y * 100}%`;
+        box.style.width = `${region.width * 100}%`;
+        box.style.height = `${region.height * 100}%`;
+        if (index === doubtIndex) box.classList.add("is-active");
+        box.addEventListener("click", (event) => {
+          event.stopPropagation();
+          const input = $(`#field-${region.field}`);
+          if (input) input.focus();
+        });
+        layer.appendChild(box);
+      });
+      doubtBtn.hidden = !view.regions.length;
+    }
+
+    function showPage(page, then) {
+      view.page = clamp(page, 1, Math.max(1, view.pages));
+      pageLabel.textContent = `${view.page} / ${view.pages}`;
+      $("#pagePrev").disabled = view.page <= 1;
+      $("#pageNext").disabled = view.page >= view.pages;
+      const requested = `/invoices/${encodeURIComponent(view.id)}/pages/${view.page}.png`;
+      image.onload = () => {
+        if (image.getAttribute("src") !== requested) return;
+        view.width = image.naturalWidth;
+        view.height = image.naturalHeight;
+        measure();
+        drawRegions();
+        if (then) then(); else fitPage(false);
+      };
+      image.setAttribute("src", requested);
+    }
+
+    function sortedRegions(regions) {
+      return regions.slice().sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x);
+    }
+
+    function focusRegion(index) {
+      const region = view.regions[index];
+      if (!region) return;
+      doubtIndex = index;
+      const go = () => {
+        drawRegions();
+        const { w, h } = stageSize();
+        const z = clamp((0.6 * w) / (region.width * view.width * view.fit), 1, MAX_ZOOM);
+        const s = view.fit * z;
+        animateTo({
+          z,
+          tx: w / 2 - (region.x + region.width / 2) * view.width * s,
+          ty: h / 2 - (region.y + region.height / 2) * view.height * s,
+        });
+      };
+      if (region.page !== view.page) showPage(region.page, go);
+      else go();
+    }
+
+    detailPane.addEventListener("invoice:selected", (event) => {
+      const data = event.detail.data;
+      stop();
+      view.id = data.id;
+      view.pages = data.page_count || 0;
+      view.regions = sortedRegions(data.uncertain_regions || []);
+      doubtIndex = -1;
+      const hasDocument = Boolean(data.document_kind) && view.pages > 0;
+      emptyEl.hidden = hasDocument;
+      canvas.hidden = !hasDocument;
+      $$(".viewer-bar button", detailPane).forEach((button) => { button.disabled = !hasDocument; });
+      if (!hasDocument) {
+        layer.textContent = "";
+        image.removeAttribute("src");
+        doubtBtn.hidden = true;
+        pageLabel.textContent = "–";
+        return;
+      }
+      showPage(1);
+    });
+
+    detailPane.addEventListener("invoice:regions", (event) => {
+      if (event.detail.id !== view.id) return;
+      view.regions = sortedRegions(event.detail.regions || []);
+      doubtIndex = -1;
+      drawRegions();
+    });
+
+    detailPane.addEventListener("region:focus", (event) => {
+      $$(".region", layer).forEach((box) => {
+        box.classList.toggle("is-hot", box.dataset.field === event.detail.field);
+      });
+    });
+
+    doubtBtn.addEventListener("click", () => focusRegion((doubtIndex + 1) % view.regions.length));
+    $("#pagePrev").addEventListener("click", () => showPage(view.page - 1));
+    $("#pageNext").addEventListener("click", () => showPage(view.page + 1));
+    const centre = () => { const { w, h } = stageSize(); return [w / 2, h / 2]; };
+    $("#zoomIn").addEventListener("click", () => zoomAround(view.z * 1.25, ...centre(), true));
+    $("#zoomOut").addEventListener("click", () => zoomAround(view.z / 1.25, ...centre(), true));
+    $("#zoomFit").addEventListener("click", () => fitPage(true));
+
+    // Ctrl + wheel (and trackpad pinch, which browsers report the same way)
+    // zooms around the pointer; a plain wheel pans once the page overflows.
+    viewerStage.addEventListener("wheel", (event) => {
+      if (!view.width) return;
+      const rect = viewerStage.getBoundingClientRect();
+      if (event.ctrlKey) {
+        event.preventDefault();
+        zoomAround(view.z * Math.exp(-event.deltaY * 0.002), event.clientX - rect.left, event.clientY - rect.top, false);
+        return;
+      }
+      const b = bounds(view.z);
+      if (b.minY === b.maxY && b.minX === b.maxX) return; // nothing to pan: let the page scroll
+      event.preventDefault();
+      stop();
+      view.tx = clamp(view.tx - event.deltaX, b.minX, b.maxX);
+      view.ty = clamp(view.ty - event.deltaY, b.minY, b.maxY);
+      apply();
+    }, { passive: false });
+
+    // Drag to pan (1:1, keeping the grab point), two fingers to pinch-zoom.
+    const pointers = new Map();
+    let drag = null;
+    let pinch = null;
+    viewerStage.addEventListener("pointerdown", (event) => {
+      if (!view.width || event.button > 0) return;
+      stop();
+      viewerStage.setPointerCapture(event.pointerId);
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointers.size === 1) {
+        drag = { x: event.clientX, y: event.clientY, tx: view.tx, ty: view.ty };
+        viewerStage.classList.add("is-dragging");
+      } else if (pointers.size === 2) {
+        const [a, b] = Array.from(pointers.values());
+        pinch = { distance: Math.hypot(a.x - b.x, a.y - b.y), z: view.z };
+        drag = null;
+      }
+    });
+    viewerStage.addEventListener("pointermove", (event) => {
+      if (!pointers.has(event.pointerId)) return;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pinch && pointers.size === 2) {
+        const [a, b] = Array.from(pointers.values());
+        const rect = viewerStage.getBoundingClientRect();
+        const distance = Math.hypot(a.x - b.x, a.y - b.y);
+        zoomAround(pinch.z * (distance / pinch.distance), (a.x + b.x) / 2 - rect.left, (a.y + b.y) / 2 - rect.top, false);
+      } else if (drag) {
+        const bnd = bounds(view.z);
+        const { w, h } = stageSize();
+        view.tx = soft(drag.tx + event.clientX - drag.x, bnd.minX, bnd.maxX, w);
+        view.ty = soft(drag.ty + event.clientY - drag.y, bnd.minY, bnd.maxY, h);
+        apply();
+      }
+    });
+    const release = (event) => {
+      if (!pointers.has(event.pointerId)) return;
+      pointers.delete(event.pointerId);
+      if (pointers.size < 2) pinch = null;
+      if (pointers.size === 0) {
+        // The stage captures the pointer, so the click never reaches the box
+        // under it: a tap (no real movement) is hit-tested here instead.
+        if (drag && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 4) {
+          const hit = document.elementFromPoint(event.clientX, event.clientY);
+          const box = hit && hit.closest(".region");
+          const input = box && $(`#field-${box.dataset.field}`);
+          if (input) input.focus();
+        }
+        drag = null;
+        viewerStage.classList.remove("is-dragging");
+        animateTo(settled(view.z)); // spring back inside the edges
+      }
+    };
+    viewerStage.addEventListener("pointerup", release);
+    viewerStage.addEventListener("pointercancel", release);
+
+    // Keyboard on the focused document: no animation, ever.
+    viewerStage.addEventListener("keydown", (event) => {
+      const [cx, cy] = centre();
+      if (event.key === "+" || event.key === "=") zoomAround(view.z * 1.25, cx, cy, false);
+      else if (event.key === "-") zoomAround(view.z / 1.25, cx, cy, false);
+      else if (event.key === "0") fitPage(false);
+      else if (event.key.startsWith("Arrow")) {
+        const b = bounds(view.z);
+        const delta = 60;
+        if (event.key === "ArrowLeft") view.tx = clamp(view.tx + delta, b.minX, b.maxX);
+        if (event.key === "ArrowRight") view.tx = clamp(view.tx - delta, b.minX, b.maxX);
+        if (event.key === "ArrowUp") view.ty = clamp(view.ty + delta, b.minY, b.maxY);
+        if (event.key === "ArrowDown") view.ty = clamp(view.ty - delta, b.minY, b.maxY);
+        stop();
+        apply();
+      } else return;
+      event.preventDefault();
+    });
+
+    window.addEventListener("resize", () => {
+      if (!view.width) return;
+      measure();
+      const target = settled(view.z);
+      Object.assign(view, target);
+      apply();
+    });
+  }
 
   /* --------------------------------------------------------- products */
 

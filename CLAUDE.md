@@ -49,6 +49,7 @@ that tenant → per-tenant SQLite database and file directory.
 | `learning.py` | User corrections → generalised extraction rules |
 | `charts.py` | Dashboard chart geometry (scales, ticks, bar rectangles) |
 | `excel_export.py` | Excel export of the filtered table, with the review colour code |
+| `documents.py` | Page count of a stored original and PNG rendering of one page, for the viewer |
 | `app.py` | FastAPI routes, templates, session middleware |
 
 ### Multi-tenancy: isolation by construction
@@ -106,7 +107,7 @@ this process is not running (server restarted mid-import) is marked `interrupted
 
 **Import summary pop-up.** When a batch ends, `app.js` fetches `/api/batches/{id}/summary`
 (409 while still running) and shows the modal defined in `base.html`. `db.batch_summary`
-counts from the rows the batch actually wrote (`invoices` + `duplicates`), not from the
+counts from the rows the batch actually wrote (`invoices` + `import_log`), not from the
 `batches` counters, and derives `not_processed` from the difference with `total` — that is
 what an interrupted batch reports. Failures are grouped by `db.error_kind`, which matches
 the opening words of the error messages written in `extraction.py` / `pipeline.py`: **a new
@@ -116,12 +117,14 @@ must survive the user leaving the page mid-import, so it is re-offered on page l
 `acknowledged_at`); the migration marks pre-existing batches acknowledged so they don't pop
 up after an upgrade. Links in the summary use the `batch` filter of `/invoices`.
 
-One catch worth keeping in mind: a summary link pointing at an **anchor of the page already
-shown** (`/invoices#doublons`) does nothing on its own — the browser jumps without reloading,
-so the modal stays up and the panel never opens. Such links carry `data-summary-anchor`, and
-the handler acknowledges the batch, waits for that to land (a reload would race it and bring
-the pop-up straight back), then reloads onto the anchor, where `openDuplicates` opens the
-panel with the rows the import just added.
+**Import log.** Every file of an import that did not become a valid invoice is written to
+`import_log` with a reason code (`DUPLICATE`, `UNSUPPORTED`, `EXTRACTION`, `QUOTA`, `OTHER`,
+derived from `db.error_kind` by `db.reason_for_error`). Failures *also* keep their error row
+in `invoices` (the "En erreur" tab, retryable by re-importing); duplicates exist only in the
+log. The log is never listed in the app: it only feeds the summary's error message, which
+names the files already imported. There is no duplicates panel and no `#doublons` anchor any
+more — product decision. The old `duplicates` table is copied into the log once, when the log
+is first created on an existing database, and is no longer written.
 
 `InvoiceSource` holds archive bytes lazily: members are read only when a worker picks them
 up, so a 300 MB archive is never fully decompressed in memory. The shared `archive_bytes` is
@@ -139,8 +142,8 @@ Every document is fingerprinted (SHA-256 of its bytes) in `pipeline._process_one
 it is stored or sent to Claude. On the reference dataset 39 of 1181 files are exact copies —
 several are the same invoice filed in two monthly archives — which would otherwise be stored
 twice, extracted (paid) twice, and **counted twice in the Dashboard totals**. That last point
-is why this is a correctness feature, not just a storage one. A skipped copy is logged in the
-`duplicates` table (shown on the Invoices page) rather than silently dropped.
+is why this is a correctness feature, not just a storage one. A skipped copy is logged in
+`import_log` (reason `DUPLICATE`, with the invoice it duplicates) rather than silently dropped.
 
 Three rules to preserve:
 
@@ -197,8 +200,14 @@ If the rule set still outgrows this, the alternative is to stop sending all of t
 archive folder name is a usable supplier hint *before* extraction (the reference dataset
 stores invoices under `<month>/<supplier>/`), so rules could be selected per invoice.
 
-Learning is triggered automatically once `AUTO_LEARN_THRESHOLD` corrections are pending, and
-manually from the Invoices panel. Corrections are marked `learned` either way — including
+**Confirmations are corrections too.** "Confirmer" (one field) and "Valider la facture" (all
+doubtful fields) clear the doubt without changing the value and log a `corrections` row with
+`kind = 'confirmation'` (old value = new value). `learning._format_corrections` presents it as
+"signalée douteuse, confirmée exacte", so a rule can also say *stop doubting this field for
+this supplier*. Confirmations count towards the threshold below.
+
+Learning is triggered automatically once `AUTO_LEARN_THRESHOLD` corrections or confirmations
+are pending (`app._after_review`), and manually from the learned-rules sheet. Corrections are marked `learned` either way — including
 those too vague to yield a rule — so they are not re-analysed on every run.
 
 ### Claude API integration
@@ -298,12 +307,20 @@ half a cent to a cent per invoice — so do not add verbose fields to the schema
   and this file may).
 - All buttons share one colour; `.btn-primary` only makes the label heavier. Blue is kept
   for links and focus, not button fills.
-- The document viewer (`#docModal`) shows the original beside its editable fields, because
-  opening a document is mostly done to check what was extracted. It loads fields from
-  `GET /api/invoices/{id}` and saves through the same `saveField` path as the table cells
-  (so corrections still feed the learning loop), then syncs the table row. Saves are tied to
-  the invoice id captured when the field was focused: moving to the next invoice while an
-  edit is pending must not write it onto the new one.
+- The Invoices page is a list / detail split: the list on the left (filters, status tabs,
+  server-side sort `db.SORT_ORDERS`), the selected invoice on the right with its document and
+  editable fields. The selection lives in the URL (`?id=`). Fields load from
+  `GET /api/invoices/{id}` and save through `saveField` (so corrections still feed the
+  learning loop). Saves are tied to the invoice id captured when the field was focused:
+  moving to the next invoice while an edit is pending must not write it onto the new one.
+- **The viewer draws the doubt on the document.** Extraction returns `uncertain_regions`
+  (page + box in fractions of the page) for each doubtful field; `extraction.clean_regions`
+  drops boxes for non-doubtful fields, missing pages or no area, and clamps the rest. Pages are
+  served as images by `/invoices/{id}/pages/{n}.png` (PDF rendered at 200 dpi by
+  `documents.py`, photos as-is). One `translate + scale` transform moves page and boxes
+  together; the boxes are placed in percentages, so zoom and pan never recompute them. Motion
+  is a critically damped spring from the on-screen value (interruptible); keyboard actions
+  are never animated. Invoices imported before this have no boxes — not re-extracted.
 
 ### Security invariants
 
@@ -321,8 +338,11 @@ Checked by the security suite; breaking one of these is a vulnerability, not a r
 - **Session = tenant + account.** `current_user` refuses a cookie whose tenant is not the
   host's *and* one whose account no longer exists; `/login` clears the session before
   setting it, and `auth` locks an email+IP after `FAILURES_BEFORE_LOCK` failures.
-- **Framing is `'self'`, never `'none'`.** The document viewer iframes the original from this
-  same origin, and `X-Frame-Options: DENY` / `frame-ancestors 'none'` breaks it — Firefox
+- **The page images route re-checks containment** (`app._stored_path`, shared with
+  `/invoices/{id}/file`), validates the page number, serves only `VIEWABLE_TYPES` and sends
+  `no-store`.
+- **Framing is `'self'`, never `'none'`.** "Ouvrir l'original" and any same-origin embedding of
+  the original rely on it, and `X-Frame-Options: DENY` / `frame-ancestors 'none'` breaks it — Firefox
   refuses even a same-origin frame. `SAMEORIGIN` / `'self'` still blocks clickjacking from
   another site, which is the point of the header.
 - **Cookies are `Secure` as soon as `APP_DOMAIN` is set** (`SESSION_HTTPS_ONLY` overrides).

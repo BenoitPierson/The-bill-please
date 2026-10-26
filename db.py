@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     error            TEXT,
     page_count       INTEGER DEFAULT 0,
     uncertain_fields TEXT NOT NULL DEFAULT '[]',
+    uncertain_regions TEXT NOT NULL DEFAULT '[]',
     edited_fields    TEXT NOT NULL DEFAULT '[]',
     content_sha256   TEXT,
     file_size        INTEGER,
@@ -107,10 +108,28 @@ CREATE TABLE IF NOT EXISTS corrections (
     new_value     TEXT,
     user_email    TEXT,
     created_at    TEXT NOT NULL,
-    learned       INTEGER NOT NULL DEFAULT 0
+    learned       INTEGER NOT NULL DEFAULT 0,
+    kind          TEXT NOT NULL DEFAULT 'correction'
 );
 
 CREATE INDEX IF NOT EXISTS idx_corrections_pending ON corrections(learned, supplier_name);
+
+-- Every file of an import that did not become a valid invoice, with why.
+-- Never listed in the app: it only feeds the import summary's error message.
+CREATE TABLE IF NOT EXISTS import_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id     TEXT,
+    archive      TEXT,
+    filename     TEXT NOT NULL,
+    reason       TEXT NOT NULL,
+    message      TEXT,
+    duplicate_of TEXT,
+    invoice_id   TEXT,
+    file_size    INTEGER,
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_log_batch ON import_log(batch_id);
 
 CREATE TABLE IF NOT EXISTS learned_rules (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,13 +171,18 @@ MIGRATIONS = (
     ("batches", "duplicates", "INTEGER NOT NULL DEFAULT 0"),
     ("batches", "started_by", "TEXT"),
     ("batches", "acknowledged_at", "TEXT"),
+    ("invoices", "uncertain_regions", "TEXT NOT NULL DEFAULT '[]'"),
+    ("corrections", "kind", "TEXT NOT NULL DEFAULT 'correction'"),
 )
+
+DUPLICATE_MESSAGE = "Document identique à une facture déjà importée."
+
 
 _initialised = set()
 _init_lock = threading.Lock()
 
 
-def _migrate(conn: sqlite3.Connection, slug: str) -> None:
+def _migrate(conn: sqlite3.Connection, slug: str, had_import_log: bool = True) -> None:
     added = set()
     for table, column, declaration in MIGRATIONS:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info({})".format(table))}
@@ -181,6 +205,20 @@ def _migrate(conn: sqlite3.Connection, slug: str) -> None:
 
     if added_hash:
         _backfill_fingerprints(conn, slug)
+
+    if not had_import_log:
+        # The import log replaces the duplicates table: carry its history over
+        # once, when the log is first created on an existing database.
+        conn.execute(
+            """
+            INSERT INTO import_log (batch_id, archive, filename, reason, message,
+                                    duplicate_of, invoice_id, file_size, created_at)
+            SELECT batch_id, archive, filename, 'DUPLICATE', ?, duplicate_of, NULL,
+                   file_size, created_at
+            FROM duplicates ORDER BY id
+            """,
+            (DUPLICATE_MESSAGE,),
+        )
 
 
 def _backfill_fingerprints(conn: sqlite3.Connection, slug: str) -> None:
@@ -217,11 +255,14 @@ def connect(slug: str) -> Iterator[sqlite3.Connection]:
         key = str(path)
         with _init_lock:
             if fresh_file or key not in _initialised:
+                had_import_log = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'import_log'"
+                ).fetchone() is not None
                 # WAL lets the web request read while import threads write; the
                 # mode is persistent, so setting it once is enough.
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.executescript(SCHEMA)
-                _migrate(connection, slug)
+                _migrate(connection, slug, had_import_log or fresh_file)
                 connection.commit()
                 _initialised.add(key)
         yield connection
@@ -337,12 +378,42 @@ ERROR_KINDS = (
 )
 
 
+IMPORT_REASONS = ("DUPLICATE", "UNSUPPORTED", "EXTRACTION", "QUOTA", "OTHER")
+
+
 def error_kind(message: Optional[str]) -> str:
     text = (message or "").strip()
     for kind, prefixes in ERROR_KINDS:
         if text.startswith(prefixes):
             return kind
     return "other"
+
+
+def reason_for_error(message: Optional[str]) -> str:
+    """Import log reason code for an error message written by the import."""
+    return {"quota": "QUOTA", "unsupported": "UNSUPPORTED", "extraction": "EXTRACTION"}.get(
+        error_kind(message), "OTHER"
+    )
+
+
+def log_import_event(
+    slug: str,
+    batch_id: Optional[str],
+    filename: str,
+    archive: Optional[str],
+    reason: str,
+    message: Optional[str],
+    file_size: Optional[int] = None,
+    duplicate_of: Optional[str] = None,
+    invoice_id: Optional[str] = None,
+) -> None:
+    """Record one file of an import that did not become a valid invoice."""
+    with connect(slug) as conn:
+        conn.execute(
+            "INSERT INTO import_log (batch_id, archive, filename, reason, message, duplicate_of,"
+            " invoice_id, file_size, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (batch_id, archive, filename, reason, message, duplicate_of, invoice_id, file_size, now()),
+        )
 
 
 def batch_summary(slug: str, batch_id: str, examples: int = 8) -> Optional[Dict[str, Any]]:
@@ -367,13 +438,14 @@ def batch_summary(slug: str, batch_id: str, examples: int = 8) -> Optional[Dict[
             (batch_id,),
         ).fetchall()
         duplicate_count = conn.execute(
-            "SELECT COUNT(*) AS n FROM duplicates WHERE batch_id = ?", (batch_id,)
+            "SELECT COUNT(*) AS n FROM import_log WHERE batch_id = ? AND reason = 'DUPLICATE'",
+            (batch_id,),
         ).fetchone()["n"]
         duplicate_rows = conn.execute(
             """
             SELECT d.filename, d.archive, i.filename AS original_filename
-            FROM duplicates d LEFT JOIN invoices i ON i.id = d.duplicate_of
-            WHERE d.batch_id = ? ORDER BY d.filename LIMIT ?
+            FROM import_log d LEFT JOIN invoices i ON i.id = d.duplicate_of
+            WHERE d.batch_id = ? AND d.reason = 'DUPLICATE' ORDER BY d.filename LIMIT ?
             """,
             (batch_id, examples),
         ).fetchall()
@@ -421,8 +493,8 @@ def insert_invoice(slug: str, record: Dict[str, Any]) -> str:
                 id, batch_id, archive, filename, stored_name, content_type,
                 supplier_name, invoice_number, invoice_date, total_amount, currency,
                 vat_amount, extraction_notes, error, page_count, uncertain_fields,
-                edited_fields, content_sha256, file_size, created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                uncertain_regions, edited_fields, content_sha256, file_size, created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 invoice_id,
@@ -441,6 +513,7 @@ def insert_invoice(slug: str, record: Dict[str, Any]) -> str:
                 record.get("error"),
                 record.get("page_count") or 0,
                 json.dumps(record.get("uncertain_fields") or [], ensure_ascii=False),
+                json.dumps(record.get("uncertain_regions") or [], ensure_ascii=False),
                 "[]",
                 record.get("content_sha256"),
                 record.get("file_size"),
@@ -502,41 +575,11 @@ def insert_lines(slug: str, invoice_id: str, lines: List[Dict[str, Any]]) -> int
     return len(lines)
 
 
-def record_duplicate(
-    slug: str,
-    batch_id: str,
-    filename: str,
-    archive: Optional[str],
-    duplicate_of: str,
-    file_size: int,
-) -> None:
-    with connect(slug) as conn:
-        conn.execute(
-            "INSERT INTO duplicates (batch_id, archive, filename, duplicate_of, file_size, created_at)"
-            " VALUES (?,?,?,?,?,?)",
-            (batch_id, archive, filename, duplicate_of, file_size, now()),
-        )
-
-
-def list_duplicates(slug: str, limit: int = 50) -> List[sqlite3.Row]:
-    with connect(slug) as conn:
-        return conn.execute(
-            """
-            SELECT d.filename, d.archive, d.file_size, d.created_at, d.duplicate_of,
-                   i.filename AS original_filename, i.archive AS original_archive,
-                   i.stored_name AS original_stored_name
-            FROM duplicates d LEFT JOIN invoices i ON i.id = d.duplicate_of
-            ORDER BY d.created_at DESC, d.id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-
-
 def duplicate_summary(slug: str) -> Dict[str, int]:
     with connect(slug) as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS n, IFNULL(SUM(file_size), 0) AS bytes FROM duplicates"
+            "SELECT COUNT(*) AS n, IFNULL(SUM(file_size), 0) AS bytes FROM import_log"
+            " WHERE reason = 'DUPLICATE'"
         ).fetchone()
     return {"count": row["n"], "bytes": row["bytes"]}
 
@@ -583,18 +626,48 @@ def _filter_clause(filters: Dict[str, Any]):
     return (" WHERE " + " AND ".join(where)) if where else "", params
 
 
-def list_invoices(slug: str, filters: Dict[str, Any], limit: int = 500, offset: int = 0):
+# Orders the Invoices list can be sorted by. A whitelist: the key comes from
+# the query string, the value goes into the SQL text.
+SORT_ORDERS = {
+    "date_desc": "invoice_date IS NULL, invoice_date DESC, created_at DESC",
+    "date_asc": "invoice_date IS NULL, invoice_date ASC, created_at ASC",
+    "amount_desc": "total_amount IS NULL, total_amount DESC, created_at DESC",
+    "amount_asc": "total_amount IS NULL, total_amount ASC, created_at ASC",
+}
+
+
+def list_invoices(
+    slug: str, filters: Dict[str, Any], limit: int = 500, offset: int = 0, sort: str = "date_desc"
+):
     clause, params = _filter_clause(filters)
+    order = SORT_ORDERS.get(sort, SORT_ORDERS["date_desc"])
     with connect(slug) as conn:
         rows = conn.execute(
-            "SELECT * FROM invoices{} ORDER BY IFNULL(invoice_date, '') DESC, created_at DESC "
-            "LIMIT ? OFFSET ?".format(clause),
+            "SELECT * FROM invoices{} ORDER BY {}, rowid DESC LIMIT ? OFFSET ?".format(clause, order),
             params + [limit, offset],
         ).fetchall()
         total = conn.execute(
             "SELECT COUNT(*) AS n FROM invoices{}".format(clause), params
         ).fetchone()["n"]
     return rows, total
+
+
+def status_counts(slug: str, filters: Dict[str, Any]) -> Dict[str, int]:
+    """How many invoices each status tab would show, under the other filters."""
+    others = dict(filters)
+    others["status"] = ""
+    clause, params = _filter_clause(others)
+    with connect(slug) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n_all,
+                   SUM(CASE WHEN error IS NULL AND uncertain_fields != '[]' THEN 1 ELSE 0 END) AS n_unc,
+                   SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS n_err
+            FROM invoices{}
+            """.format(clause),
+            params,
+        ).fetchone()
+    return {"all": row["n_all"] or 0, "uncertain": row["n_unc"] or 0, "errors": row["n_err"] or 0}
 
 
 def product_lines(slug: str, filters: Dict[str, Any], limit: int = 100000) -> List[Dict[str, Any]]:
@@ -638,27 +711,66 @@ def update_invoice_field(slug: str, invoice_id: str, field: str, value: Any) -> 
 
     with connect(slug) as conn:
         row = conn.execute(
-            "SELECT uncertain_fields, edited_fields FROM invoices WHERE id = ?", (invoice_id,)
+            "SELECT uncertain_fields, uncertain_regions, edited_fields FROM invoices WHERE id = ?",
+            (invoice_id,),
         ).fetchone()
         if row is None:
             raise LookupError("Facture introuvable")
 
         edited = set(json.loads(row["edited_fields"] or "[]"))
         edited.add(field)
-        # A hand-corrected value is no longer doubtful.
+        # A hand-corrected value is no longer doubtful, and its box goes with the doubt.
         uncertain = [f for f in json.loads(row["uncertain_fields"] or "[]") if f != field]
+        regions = [r for r in json.loads(row["uncertain_regions"] or "[]") if r.get("field") != field]
 
         conn.execute(
-            "UPDATE invoices SET {} = ?, edited_fields = ?, uncertain_fields = ?, updated_at = ? "
-            "WHERE id = ?".format(field),
+            "UPDATE invoices SET {} = ?, edited_fields = ?, uncertain_fields = ?, uncertain_regions = ?,"
+            " updated_at = ? WHERE id = ?".format(field),
             (
                 value,
                 json.dumps(sorted(edited), ensure_ascii=False),
                 json.dumps(uncertain, ensure_ascii=False),
+                json.dumps(regions, ensure_ascii=False),
                 now(),
                 invoice_id,
             ),
         )
+
+
+def confirm_fields(
+    slug: str, invoice_id: str, fields: Sequence[str], user_email: str
+) -> Dict[str, Any]:
+    """Mark doubtful values as checked and right, without changing them.
+
+    Each confirmation is logged like a correction (kind 'confirmation'), so the
+    learning loop also hears where the extraction doubted for nothing.
+    """
+    with connect(slug) as conn:
+        row = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+        if row is None:
+            raise LookupError("Facture introuvable")
+        uncertain = json.loads(row["uncertain_fields"] or "[]")
+        for field in fields:
+            if field not in EDITABLE_FIELDS:
+                raise ValueError("Champ non modifiable : {}".format(field))
+            if field not in uncertain:
+                raise ValueError("Ce champ n'est pas signale comme douteux : {}".format(field))
+        confirmed = set(fields)
+        remaining = [f for f in uncertain if f not in confirmed]
+        regions = [r for r in json.loads(row["uncertain_regions"] or "[]") if r.get("field") not in confirmed]
+        conn.execute(
+            "UPDATE invoices SET uncertain_fields = ?, uncertain_regions = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(remaining, ensure_ascii=False), json.dumps(regions, ensure_ascii=False),
+             now(), invoice_id),
+        )
+        for field in fields:
+            value = "" if row[field] is None else str(row[field])
+            conn.execute(
+                "INSERT INTO corrections (invoice_id, supplier_name, field, old_value, new_value,"
+                " user_email, created_at, kind) VALUES (?,?,?,?,?,?,?, 'confirmation')",
+                (invoice_id, row["supplier_name"], field, value, value, user_email, now()),
+            )
+    return {"uncertain_fields": remaining, "uncertain_regions": regions}
 
 
 def distinct_suppliers(slug: str) -> List[str]:
@@ -681,13 +793,14 @@ def record_correction(
     old_value: Any,
     new_value: Any,
     user_email: str,
+    kind: str = "correction",
 ) -> None:
     with connect(slug) as conn:
         conn.execute(
             """
             INSERT INTO corrections
-                (invoice_id, supplier_name, field, old_value, new_value, user_email, created_at)
-            VALUES (?,?,?,?,?,?,?)
+                (invoice_id, supplier_name, field, old_value, new_value, user_email, created_at, kind)
+            VALUES (?,?,?,?,?,?,?,?)
             """,
             (
                 invoice_id,
@@ -697,6 +810,7 @@ def record_correction(
                 "" if new_value is None else str(new_value),
                 user_email,
                 now(),
+                kind,
             ),
         )
 

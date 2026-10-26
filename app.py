@@ -10,10 +10,13 @@ import json
 import logging
 import os
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from urllib.parse import urlencode
+from typing import Any, Dict, List, Optional, Tuple
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
+from fastapi.concurrency import run_in_threadpool
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import (
     FileResponse,
@@ -30,6 +33,7 @@ import auth
 import charts
 import dashboard as homepage
 import db
+import documents
 import learning
 import pipeline
 import products
@@ -434,7 +438,17 @@ def invoices(request: Request) -> Response:
         page = 1
     per_page = 100
 
-    rows, total = db.list_invoices(slug, filters, limit=per_page, offset=(page - 1) * per_page)
+    sort = request.query_params.get("sort", "date_desc")
+    if sort not in db.SORT_ORDERS:
+        sort = "date_desc"
+    rows, total = db.list_invoices(
+        slug, filters, limit=per_page, offset=(page - 1) * per_page, sort=sort
+    )
+    # Every link on the page rebuilds its query from these, so a change of page,
+    # status or sort never drops the other choices.
+    kept = {key: value for key, value in filters.items() if value}
+    if sort != "date_desc":
+        kept["sort"] = sort
 
     context = _page_context(request, slug, email, "invoices")
     context.update(
@@ -444,12 +458,14 @@ def invoices(request: Request) -> Response:
             "page": page,
             "per_page": per_page,
             "page_count": max(1, (total + per_page - 1) // per_page),
+            "sort": sort,
+            "status_counts": db.status_counts(slug, filters),
+            "page_query": urlencode(kept),
+            "status_query": urlencode({k: v for k, v in kept.items() if k != "status"}),
             "editable_fields": list(db.EDITABLE_FIELDS),
             "rules": [dict(r) for r in db.list_rules(slug)],
             "batches": _running_batches(slug),
             "storage": _storage_view(slug),
-            "duplicates": [dict(d) for d in db.list_duplicates(slug)],
-            "duplicate_summary": db.duplicate_summary(slug),
         }
     )
     return templates.TemplateResponse("invoices.html", context)
@@ -682,9 +698,15 @@ def api_get_invoice(request: Request, invoice_id: str) -> Response:
             "error": invoice["error"],
             "extraction_notes": invoice["extraction_notes"],
             "uncertain_fields": json.loads(invoice["uncertain_fields"] or "[]"),
+            "uncertain_regions": json.loads(invoice["uncertain_regions"] or "[]"),
             "edited_fields": json.loads(invoice["edited_fields"] or "[]"),
         }
     )
+    path = _stored_path(slug, invoice)
+    payload["page_count"] = documents.page_count(path) if path else 0
+    payload["document_kind"] = None
+    if path and payload["page_count"]:
+        payload["document_kind"] = "pdf" if path.suffix.lower() == ".pdf" else "image"
     return JSONResponse(payload)
 
 
@@ -724,21 +746,61 @@ async def api_edit_invoice(request: Request, invoice_id: str) -> Response:
     )
     logger.info("[%s] correction par %s : %s de la facture %s", slug, email, field, invoice_id)
 
-    pending = db.count_pending_corrections(slug)
-    learned = None
-    if pending >= AUTO_LEARN_THRESHOLD:
-        # Enough signal accumulated: distill the corrections into rules now, so
-        # the very next import already benefits from them.
-        learned = learning.refresh_rules(get_client(), slug)
-
+    # The learning run is a blocking Claude call: keep it off the event loop.
+    pending, learned = await run_in_threadpool(_after_review, slug)
     return JSONResponse(
-        {
-            "status": "ok",
-            "value": value,
-            "pending_corrections": db.count_pending_corrections(slug),
-            "learned": learned,
-        }
+        {"status": "ok", "value": value, "pending_corrections": pending, "learned": learned}
     )
+
+
+def _after_review(slug: str) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """Pending corrections/confirmations, and the learning run they may trigger."""
+    learned = None
+    if db.count_pending_corrections(slug) >= AUTO_LEARN_THRESHOLD:
+        # Enough signal accumulated: distill it into rules now, so the very
+        # next import already benefits from them.
+        learned = learning.refresh_rules(get_client(), slug)
+    return db.count_pending_corrections(slug), learned
+
+
+def _review_response(slug: str, invoice_id: str, fields: List[str], email: str) -> Response:
+    try:
+        state = db.confirm_fields(slug, invoice_id, fields, email)
+    except LookupError:
+        return JSONResponse({"error": "Facture introuvable."}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    pending, learned = _after_review(slug)
+    state.update({"status": "ok", "pending_corrections": pending, "learned": learned})
+    return JSONResponse(state)
+
+
+@app.post("/api/invoices/{invoice_id}/confirm")
+async def api_confirm_field(request: Request, invoice_id: str) -> Response:
+    """The doubtful value is right as extracted: drop the doubt, remember it."""
+    slug, email, redirect = _require_login(request)
+    if redirect is not None:
+        return JSONResponse({"error": "Session expiree."}, status_code=401)
+    payload = await request.json()
+    field = payload.get("field") if isinstance(payload, dict) else None
+    if not isinstance(field, str):
+        return JSONResponse({"error": "Champ manquant."}, status_code=400)
+    # May trigger a learning run, a blocking Claude call: keep it off the loop.
+    return await run_in_threadpool(_review_response, slug, invoice_id, [field], email)
+
+
+@app.post("/api/invoices/{invoice_id}/validate")
+def api_validate_invoice(request: Request, invoice_id: str) -> Response:
+    """Every remaining doubtful value of the invoice is confirmed."""
+    slug, email, redirect = _require_login(request)
+    if redirect is not None:
+        return JSONResponse({"error": "Session expiree."}, status_code=401)
+    invoice = db.get_invoice(slug, invoice_id)
+    if invoice is None:
+        return JSONResponse({"error": "Facture introuvable."}, status_code=404)
+    if invoice["error"]:
+        return JSONResponse({"error": "Une facture en erreur ne peut pas etre validee."}, status_code=400)
+    return _review_response(slug, invoice_id, json.loads(invoice["uncertain_fields"] or "[]"), email)
 
 
 @app.post("/api/learn")
@@ -774,6 +836,38 @@ VIEWABLE_TYPES = {
 }
 
 
+def _stored_path(slug: str, invoice) -> Optional[Path]:
+    """The invoice's stored original, or None if it has none or it is gone.
+
+    Resolved inside the tenant's own directory with containment verified, so a
+    crafted stored_name can never reach another tenant's files.
+    """
+    if not invoice["stored_name"]:
+        return None
+    directory = tenants.files_dir(slug).resolve()
+    path = (directory / invoice["stored_name"]).resolve()
+    if directory not in path.parents or not path.is_file():
+        return None
+    return path
+
+
+@app.get("/invoices/{invoice_id}/pages/{page}.png")
+def invoice_page(request: Request, invoice_id: str, page: int) -> Response:
+    """One page of the original as an image, for the viewer to draw boxes on."""
+    slug, email, redirect = _require_login(request)
+    if redirect is not None:
+        return redirect
+    invoice = db.get_invoice(slug, invoice_id)
+    path = _stored_path(slug, invoice) if invoice is not None else None
+    media_type = VIEWABLE_TYPES.get(path.suffix.lower()) if path else None
+    if path is None or media_type is None or not 1 <= page <= documents.page_count(path):
+        return JSONResponse({"error": "Page indisponible."}, status_code=404)
+    headers = {"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store, private"}
+    if media_type != "application/pdf":
+        return FileResponse(str(path), media_type=media_type, headers=headers)
+    return Response(content=documents.render_page_png(path, page), media_type="image/png", headers=headers)
+
+
 @app.get("/invoices/{invoice_id}/file")
 def invoice_file(request: Request, invoice_id: str) -> Response:
     slug, email, redirect = _require_login(request)
@@ -781,14 +875,8 @@ def invoice_file(request: Request, invoice_id: str) -> Response:
         return redirect
 
     invoice = db.get_invoice(slug, invoice_id)
-    if invoice is None or not invoice["stored_name"]:
-        return JSONResponse({"error": "Document original indisponible."}, status_code=404)
-
-    # Resolve inside the tenant's own directory and verify containment, so a
-    # crafted stored_name can never reach another tenant's files.
-    directory = tenants.files_dir(slug).resolve()
-    path = (directory / invoice["stored_name"]).resolve()
-    if directory not in path.parents or not path.exists():
+    path = _stored_path(slug, invoice) if invoice is not None else None
+    if path is None:
         return JSONResponse({"error": "Document original indisponible."}, status_code=404)
 
     # The stored content type comes from the upload, so it is user-controlled:
@@ -818,7 +906,9 @@ def export_invoices(request: Request) -> Response:
         return redirect
 
     filters = _filters_from(request)
-    rows, _ = db.list_invoices(slug, filters, limit=100000, offset=0)
+    rows, _ = db.list_invoices(
+        slug, filters, limit=100000, offset=0, sort=request.query_params.get("sort", "date_desc")
+    )
     workbook = build_workbook(rows)
     filename = "factures_{}_{:%Y%m%d_%H%M%S}.xlsx".format(slug, datetime.now())
 

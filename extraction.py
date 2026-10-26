@@ -10,10 +10,10 @@ import os
 import posixpath
 import zipfile
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import fitz  # PyMuPDF
-from PIL import Image
+from PIL import Image, ImageOps
 from anthropic import Anthropic
 
 MODEL = "claude-sonnet-5"
@@ -165,6 +165,27 @@ INVOICE_SCHEMA = {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": "Short note about anything illegible, ambiguous, or uncertain. Null if nothing to flag.",
         },
+        "uncertain_regions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "field": {"type": "string", "enum": list(EXTRACTED_FIELDS)},
+                    "page": {"type": "integer"},
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "width": {"type": "number"},
+                    "height": {"type": "number"},
+                },
+                "required": ["field", "page", "x", "y", "width", "height"],
+                "additionalProperties": False,
+            },
+            "description": (
+                "For each field listed in uncertain_fields, where on the document its value was "
+                "read: page number (1 = first image) and a box in fractions of the page, origin "
+                "top-left. Approximate is fine. Empty when uncertain_fields is empty."
+            ),
+        },
         "uncertain_fields": {
             "type": "array",
             "items": {"type": "string", "enum": list(EXTRACTED_FIELDS)},
@@ -187,6 +208,7 @@ INVOICE_SCHEMA = {
         "lines",
         "extraction_notes",
         "uncertain_fields",
+        "uncertain_regions",
     ],
     "additionalProperties": False,
 }
@@ -248,7 +270,8 @@ compare a un prix au kilo.
 - Remplis uncertain_fields avec le nom de chaque champ dont tu n'es pas sur : valeur illisible, \
 deduite du contexte, ambigue, ou dont l'etiquette sur le document prete a confusion. Ces champs \
 seront surlignes pour relecture humaine : mieux vaut signaler un doute leger que laisser passer \
-une erreur silencieuse. Laisse le tableau vide si tout est certain."""
+une erreur silencieuse. Laisse le tableau vide si tout est certain.
+- Pour chaque champ de uncertain_fields, ajoute dans uncertain_regions la zone du document ou tu as lu la valeur : numero de page (1 pour la premiere image) et cadre en proportions de la page, de 0 a 1, origine en haut a gauche (x, y, width, height). Le cadre peut etre approximatif mais doit entourer la valeur. Laisse uncertain_regions vide si uncertain_fields est vide."""
 
 RULES_HEADER = """
 
@@ -282,6 +305,7 @@ class InvoiceResult:
     vat_amount: float | None = None
     extraction_notes: str | None = None
     uncertain_fields: List[str] = field(default_factory=list)
+    uncertain_regions: List[dict] = field(default_factory=list)
     lines: List[dict] = field(default_factory=list)
     error: str | None = None
     page_count: int = 0
@@ -411,13 +435,19 @@ def expand_upload(
 
 def _resize_if_needed(image_bytes: bytes, fmt: str) -> bytes:
     with Image.open(io.BytesIO(image_bytes)) as img:
+        # A phone photo stores its rotation in EXIF and the browser applies it.
+        # Re-encoding drops the tag, so rotate the pixels first: the model must
+        # see the frame the viewer shows, or its doubt boxes land elsewhere.
+        rotated = img.getexif().get(0x0112, 1) not in (1, None)
         long_edge = max(img.size)
-        if long_edge <= MAX_IMAGE_LONG_EDGE:
+        if long_edge <= MAX_IMAGE_LONG_EDGE and not rotated:
             return image_bytes
-        scale = MAX_IMAGE_LONG_EDGE / long_edge
-        new_size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
-        resized = img.convert("RGB") if img.mode not in ("RGB", "L") else img
-        resized = resized.resize(new_size, Image.LANCZOS)
+        upright = ImageOps.exif_transpose(img) if rotated else img
+        resized = upright.convert("RGB") if upright.mode not in ("RGB", "L") else upright
+        if long_edge > MAX_IMAGE_LONG_EDGE:
+            scale = MAX_IMAGE_LONG_EDGE / long_edge
+            new_size = (max(1, int(resized.width * scale)), max(1, int(resized.height * scale)))
+            resized = resized.resize(new_size, Image.LANCZOS)
         buf = io.BytesIO()
         resized.save(buf, format=fmt)
         return buf.getvalue()
@@ -515,6 +545,42 @@ def clean_lines(raw) -> List[dict]:
     return lines
 
 
+def _fraction(value: Any) -> Optional[float]:
+    number = _number(value)
+    return None if number is None else min(1.0, max(0.0, number))
+
+
+def clean_regions(raw: Any, uncertain_fields: Sequence[str], page_count: int) -> List[Dict[str, Any]]:
+    """Keep only usable boxes for doubtful fields, clamped inside their page.
+
+    The model's coordinates are approximate and unchecked: a box for a field it
+    did not flag, on a page that does not exist, or with no area would draw
+    something misleading on the document, so it is dropped here.
+    """
+    regions: List[Dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return regions
+    allowed = set(uncertain_fields)
+    for entry in raw:
+        if not isinstance(entry, dict) or entry.get("field") not in allowed:
+            continue
+        page = _number(entry.get("page"))
+        if page is None or page != int(page) or not 1 <= int(page) <= page_count:
+            continue
+        x, y = _fraction(entry.get("x")), _fraction(entry.get("y"))
+        width, height = _number(entry.get("width")), _number(entry.get("height"))
+        if None in (x, y, width, height):
+            continue
+        width, height = min(width, 1.0 - x), min(height, 1.0 - y)
+        if width <= 0 or height <= 0:
+            continue
+        regions.append({
+            "field": entry["field"], "page": int(page),
+            "x": round(x, 4), "y": round(y, 4), "width": round(width, 4), "height": round(height, 4),
+        })
+    return regions
+
+
 def extract_invoice(
     client: Anthropic,
     filename: str,
@@ -571,6 +637,9 @@ def extract_invoice(
         vat_amount=data.get("vat_amount"),
         extraction_notes=data.get("extraction_notes"),
         uncertain_fields=[f for f in uncertain if f in EXTRACTED_FIELDS],
+        uncertain_regions=clean_regions(
+            data.get("uncertain_regions"), [f for f in uncertain if f in EXTRACTED_FIELDS], len(pages)
+        ),
         page_count=len(pages),
     )
 

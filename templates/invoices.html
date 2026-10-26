@@ -1,293 +1,246 @@
 {% extends "base.html" %}
-{% block title %}Invoices{% endblock %}
+{% block title %}Factures{% endblock %}
 
 {% block content %}
+{% set q_status = ('&' ~ status_query) if status_query else '' %}
 <div class="page-head">
   <div>
-    <h1>Invoices</h1>
-    <p class="page-sub">{{ total }} facture{{ 's' if total > 1 else '' }}
-      {% if filters.supplier or filters.date_from or filters.date_to or filters.search or filters.status or filters.batch %}
-        <span class="muted">(filtre actif)</span>
-      {% endif %}
+    <h1>Factures</h1>
+    <p class="page-sub">
+      {{ status_counts.all }} facture{{ 's' if status_counts.all > 1 else '' }}
+      · <a href="/invoices?status=uncertain{{ q_status }}">{{ status_counts.uncertain }} à vérifier</a>
+      · <a class="signal-link" href="/invoices?status=errors{{ q_status }}">{{ status_counts.errors }} en erreur</a>
     </p>
     {% if filters.batch %}
     <p class="filter-chip">
-      Factures d'un import precis
+      Factures d'un import précis
       <a href="/invoices{% if filters.status %}?status={{ filters.status }}{% endif %}">Retirer ce filtre</a>
     </p>
     {% endif %}
   </div>
   <div class="page-actions">
-    <div class="storage {% if storage.level %}storage-{{ storage.level }}{% endif %}"
-         title="{{ storage.files }} document(s) original(aux) conserve(s)">
-      <span class="storage-label">
-        Stockage : {{ storage.used | filesize }}{% if storage.quota %} / {{ storage.quota | filesize }}{% endif %}
-      </span>
-      {% if storage.quota %}
-      <div class="storage-track"><div class="storage-fill" style="width: {{ '%.1f' % storage.percent }}%"></div></div>
-      {% endif %}
+    <button type="button" class="btn btn-ghost" id="rulesBtn" aria-controls="rulesPanel" aria-expanded="false">
+      Règles apprises · {{ rules | length }}{% if pending_corrections %} <span class="badge badge-warn">{{ pending_corrections }} en attente</span>{% endif %}
+    </button>
+    <a class="btn btn-ghost" href="/invoices/export.xlsx{% if page_query %}?{{ page_query }}{% endif %}">Exporter en Excel</a>
+    <div class="import-anchor">
+      <button type="button" class="btn btn-primary" id="importBtn" aria-controls="importPanel">Importer des factures</button>
+      <!-- Import sheet, anchored under its button --------------------------->
+      <section class="card import-card import-sheet" id="importPanel" hidden aria-label="Importer des factures">
+        <div id="dropzone" class="dropzone">
+          <strong>Glissez-déposez des factures ici</strong>
+          <span class="hint">PDF, JPG, PNG, ou un dossier compressé .zip</span>
+        </div>
+        <input type="file" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.zip" hidden>
+        <ul id="fileList" class="file-list"></ul>
+        <div class="import-actions">
+          <button class="btn btn-primary" id="startImport" disabled>Lancer l'extraction</button>
+          <span id="importStatus" class="muted"></span>
+        </div>
+        <div id="progressWrap" class="progress-wrap" hidden>
+          <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+          <span id="progressText" class="muted"></span>
+        </div>
+        <p id="etaText" class="eta" hidden aria-live="polite"></p>
+        <p class="storage-line muted small {% if storage.level %}storage-{{ storage.level }}{% endif %}">
+          Stockage : {{ storage.used | filesize }}{% if storage.quota %} sur {{ storage.quota | filesize }}{% endif %}
+          {% if storage.quota %}<span class="storage-track"><span class="storage-fill" style="transform: scaleX({{ '%.3f' % (storage.percent / 100) }})"></span></span>{% endif %}
+        </p>
+      </section>
     </div>
-    <button class="btn" id="importBtn">Importer des factures</button>
-    <a class="btn btn-primary" href="/invoices/export.xlsx?{{ request.url.query }}">Exporter en Excel</a>
   </div>
 </div>
-
-<!-- Import ------------------------------------------------------------------>
-<section class="card import-card" id="importPanel" hidden>
-  <div id="dropzone" class="dropzone">
-    <strong>Glisse-depose des factures ici</strong>
-    <span class="hint">PDF, JPG, PNG, ou un dossier compresse .zip contenant des factures</span>
-  </div>
-  <input type="file" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.zip" hidden>
-  <ul id="fileList" class="file-list"></ul>
-  <div class="import-actions">
-    <button class="btn btn-primary" id="startImport" disabled>Lancer l'extraction</button>
-    <span id="importStatus" class="muted"></span>
-  </div>
-  <div id="progressWrap" class="progress-wrap" hidden>
-    <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
-    <span id="progressText" class="muted"></span>
-  </div>
-  <p id="etaText" class="eta" hidden aria-live="polite"></p>
-</section>
 
 {% if batches %}
 <section class="alert alert-info" id="runningBatch" data-batch="{{ batches[0].id }}">
-  Un import est en cours ({{ batches[0].done }}/{{ batches[0].total }} factures traitees).
-  Cette page se mettra a jour automatiquement.
+  Un import est en cours ({{ batches[0].done }}/{{ batches[0].total }} factures traitées).
+  Cette page se mettra à jour automatiquement.
 </section>
 {% endif %}
 
-<!-- Filters ----------------------------------------------------------------->
-<form class="card filters" method="get" action="/invoices">
-  {% if filters.batch %}<input type="hidden" name="batch" value="{{ filters.batch }}">{% endif %}
-  <label class="field">
-    <span>Fournisseur</span>
-    <select name="supplier">
-      <option value="">Tous</option>
-      {% for supplier in suppliers %}
-      <option value="{{ supplier }}" {% if filters.supplier == supplier %}selected{% endif %}>{{ supplier }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label class="field">
-    <span>Du</span>
-    <input type="date" name="date_from" value="{{ filters.date_from }}">
-  </label>
-  <label class="field">
-    <span>Au</span>
-    <input type="date" name="date_to" value="{{ filters.date_to }}">
-  </label>
-  <label class="field">
-    <span>Etat</span>
-    <select name="status">
-      <option value="">Tous</option>
-      <option value="uncertain" {% if filters.status == 'uncertain' %}selected{% endif %}>A verifier</option>
-      <option value="errors" {% if filters.status == 'errors' %}selected{% endif %}>En erreur</option>
-      <option value="ok" {% if filters.status == 'ok' %}selected{% endif %}>Sans erreur</option>
-    </select>
-  </label>
-  <label class="field field-grow">
-    <span>Recherche</span>
-    <input type="search" name="search" value="{{ filters.search }}" placeholder="fournisseur, numero, fichier...">
-  </label>
-  <div class="filter-actions">
-    <button type="submit" class="btn btn-primary">Filtrer</button>
-    <a href="/invoices" class="btn btn-ghost">Reinitialiser</a>
-  </div>
-</form>
-
-<!-- Learned rules ----------------------------------------------------------->
-<details class="card rules-card" {% if pending_corrections %}open{% endif %}>
-  <summary>
-    Ce que l'automate a appris de vos corrections
-    <span class="badge">{{ rules|length }} regle{{ 's' if rules|length > 1 else '' }}</span>
-    {% if pending_corrections %}
-    <span class="badge badge-warn">{{ pending_corrections }} correction{{ 's' if pending_corrections > 1 else '' }} en attente</span>
-    {% endif %}
-  </summary>
-  <p class="hint">
-    Chaque correction manuelle est enregistree. L'automate en deduit des consignes courtes,
-    appliquees automatiquement aux prochains imports.
-  </p>
-  <ul class="rules-list" id="rulesList">
-    {% for rule in rules %}
-    <li data-rule="{{ rule.id }}">
-      <span class="rule-scope">{{ rule.supplier_name or 'Toutes factures' }}</span>
-      <span class="rule-text">{{ rule.rule }}</span>
-      <button class="btn btn-ghost btn-sm rule-delete" data-id="{{ rule.id }}">Oublier</button>
-    </li>
-    {% else %}
-    <li class="muted">Aucune regle pour l'instant — corrige quelques champs pour demarrer l'apprentissage.</li>
-    {% endfor %}
-  </ul>
-  <button class="btn" id="learnBtn">Analyser les corrections maintenant</button>
-  <span id="learnStatus" class="muted"></span>
-</details>
-
-<!-- Duplicates ------------------------------------------------------------->
-{% if duplicate_summary.count %}
-<details class="card rules-card" id="doublons">
-  <summary>
-    Doublons ignores a l'import
-    <span class="badge">{{ duplicate_summary.count }}</span>
-    <span class="badge">{{ duplicate_summary.bytes | filesize }} evites</span>
-  </summary>
-  <p class="hint">
-    Ces documents etaient identiques, au bit pres, a une facture deja importee : ils n'ont
-    ete ni stockes, ni envoyes a l'extraction, ni comptes dans les totaux.
-  </p>
-  <table class="dup-table">
-    <thead>
-      <tr><th>Document ignore</th><th>Identique a</th><th>Taille</th><th>Date</th></tr>
-    </thead>
-    <tbody>
-      {% for dup in duplicates %}
-      <tr>
-        <td>
-          {{ dup.filename.split('/')[-1] }}
-          {% if dup.archive %}<div class="muted small">{{ dup.archive }}</div>{% endif %}
-        </td>
-        <td>
-          {% if dup.original_filename %}
-            {% if dup.original_stored_name %}
-            <button class="link-btn view-doc" data-id="{{ dup.duplicate_of }}"
-                    data-name="{{ dup.original_filename }}">{{ dup.original_filename.split('/')[-1] }}</button>
-            {% else %}
-            {{ dup.original_filename.split('/')[-1] }}
-            {% endif %}
-            {% if dup.original_archive %}<div class="muted small">{{ dup.original_archive }}</div>{% endif %}
-          {% else %}
-            <span class="muted">facture depuis supprimee</span>
-          {% endif %}
-        </td>
-        <td>{{ dup.file_size | filesize }}</td>
-        <td class="muted small">{{ dup.created_at[:10] }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% if duplicate_summary.count > duplicates | length %}
-  <p class="hint">{{ duplicates | length }} plus recents affiches sur {{ duplicate_summary.count }}.</p>
-  {% endif %}
-</details>
-{% endif %}
-
-<!-- Table ------------------------------------------------------------------->
-<div class="card table-card">
-  <table class="data-table" id="invoiceTable">
-    <colgroup>
-      <col><col><col><col><col><col><col><col>
-    </colgroup>
-    <thead>
-      <tr>
-        <th>Fournisseur</th>
-        <th>Numero</th>
-        <th>Date</th>
-        <th class="num">Montant</th>
-        <th>Devise</th>
-        <th class="num">TVA</th>
-        <th>Remarques</th>
-        <th>Document</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in rows %}
-      <tr data-id="{{ row.id }}" {% if row.error %}class="row-error"{% endif %}>
-        {% for fieldname, numeric in [('supplier_name', false), ('invoice_number', false), ('invoice_date', false), ('total_amount', true), ('currency', false), ('vat_amount', true)] %}
-        <td class="cell {% if numeric %}num{% endif %}
-                   {% if fieldname in row.uncertain_fields %}is-uncertain{% endif %}
-                   {% if fieldname in row.edited_fields %}is-edited{% endif %}"
-            {% if fieldname in row.uncertain_fields %}title="Champ signale comme incertain par l'extraction"{% endif %}
-            {% if fieldname in row.edited_fields %}title="Champ corrige a la main"{% endif %}>
-          <input class="cell-input"
-                 type="{{ 'date' if fieldname == 'invoice_date' else 'text' }}"
-                 data-field="{{ fieldname }}"
-                 title="{{ row[fieldname] if row[fieldname] is not none else '' }}"
-                 value="{{ row[fieldname] if row[fieldname] is not none else '' }}">
-        </td>
+<!-- Toolbar --------------------------------------------------------------------->
+<div class="toolbar">
+  <nav class="seg-control" aria-label="État des factures">
+    <a href="/invoices{% if status_query %}?{{ status_query }}{% endif %}" class="seg-item {% if not filters.status %}is-active{% endif %}">Toutes <span class="seg-count">{{ status_counts.all }}</span></a>
+    <a href="/invoices?status=uncertain{{ q_status }}" class="seg-item {% if filters.status == 'uncertain' %}is-active{% endif %}">À vérifier <span class="seg-count">{{ status_counts.uncertain }}</span></a>
+    <a href="/invoices?status=errors{{ q_status }}" class="seg-item {% if filters.status == 'errors' %}is-active{% endif %}">En erreur <span class="seg-count">{{ status_counts.errors }}</span></a>
+  </nav>
+  <form class="toolbar-form" id="filters" method="get" action="/invoices">
+    {% if filters.status %}<input type="hidden" name="status" value="{{ filters.status }}">{% endif %}
+    {% if filters.batch %}<input type="hidden" name="batch" value="{{ filters.batch }}">{% endif %}
+    <label class="search-field">
+      <span class="visually-hidden">Recherche</span>
+      <input type="search" name="search" value="{{ filters.search }}" placeholder="Fournisseur, numéro, fichier…">
+    </label>
+    <label class="pill-field">
+      <span class="visually-hidden">Fournisseur</span>
+      <select name="supplier" data-autosubmit>
+        <option value="">Tous les fournisseurs</option>
+        {% for supplier in suppliers %}
+        <option value="{{ supplier }}" {% if filters.supplier == supplier %}selected{% endif %}>{{ supplier }}</option>
         {% endfor %}
-        <td class="notes">
-          {% if row.error %}<span class="tag tag-error">{{ row.error }}</span>{% endif %}
-          {% if row.extraction_notes %}
-          <span class="note-text" title="{{ row.extraction_notes }}">{{ row.extraction_notes }}</span>
-          {% endif %}
-        </td>
-        <td class="doc">
-          {% if row.stored_name %}
-          <button class="link-btn view-doc"
-                  data-id="{{ row.id }}"
-                  data-name="{{ row.filename }}">{{ row.filename.split('/')[-1] }}</button>
-          {% else %}
-          <span class="muted">{{ row.filename.split('/')[-1] }}</span>
-          {% endif %}
-          {% if row.archive %}<div class="muted small">{{ row.archive }}</div>{% endif %}
-        </td>
-      </tr>
-      {% else %}
-      <tr><td colspan="8" class="empty">Aucune facture. Utilise "Importer des factures" pour commencer.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+      </select>
+    </label>
+    <details class="pill-field period" {% if filters.date_from or filters.date_to %}data-active{% endif %}>
+      <summary>Période{% if filters.date_from or filters.date_to %} · {{ filters.date_from or '…' }} → {{ filters.date_to or '…' }}{% endif %}</summary>
+      <div class="period-pop">
+        <label class="field"><span>Du</span><input type="date" name="date_from" value="{{ filters.date_from }}"></label>
+        <label class="field"><span>Au</span><input type="date" name="date_to" value="{{ filters.date_to }}"></label>
+        <button type="submit" class="btn btn-primary btn-sm">Appliquer</button>
+      </div>
+    </details>
+    <label class="pill-field">
+      <span class="visually-hidden">Trier</span>
+      <select name="sort" data-autosubmit>
+        <option value="date_desc" {% if sort == 'date_desc' %}selected{% endif %}>Date : récentes d'abord</option>
+        <option value="date_asc" {% if sort == 'date_asc' %}selected{% endif %}>Date : anciennes d'abord</option>
+        <option value="amount_desc" {% if sort == 'amount_desc' %}selected{% endif %}>Montant décroissant</option>
+        <option value="amount_asc" {% if sort == 'amount_asc' %}selected{% endif %}>Montant croissant</option>
+      </select>
+    </label>
+    <button type="submit" class="btn btn-sm visually-hidden-focusable">Filtrer</button>
+  </form>
 </div>
 
-{% if page_count > 1 %}
-<nav class="pagination">
-  {% for p in range(1, page_count + 1) %}
-    {% if p == page %}
-      <span class="page-link is-active">{{ p }}</span>
+{% if not rows %}
+<section class="card empty-card">
+  <p class="empty">
+    {% if status_counts.all or filters.search or filters.supplier or filters.date_from or filters.date_to %}
+    Aucune facture ne correspond à ces filtres. <a href="/invoices">Réinitialiser les filtres</a>
     {% else %}
-      <a class="page-link" href="?{{ request.url.query|replace('page=' ~ page, '') }}&page={{ p }}">{{ p }}</a>
+    Aucune facture pour l'instant. Utilisez « Importer des factures » pour commencer.
     {% endif %}
-  {% endfor %}
-</nav>
-{% endif %}
+  </p>
+</section>
+{% else %}
+<div class="review-grid" id="reviewGrid">
 
-<p class="legend">
-  <span class="swatch swatch-uncertain"></span> Champ incertain, a verifier
-  <span class="swatch swatch-edited"></span> Champ corrige a la main
-</p>
+  <!-- List ------------------------------------------------------------------>
+  <section class="card list-card" aria-label="Liste des factures">
+    <table class="data-table invoice-list" id="invoiceList">
+      <thead>
+        <tr><th>Fournisseur</th><th>Date</th><th class="num">Montant</th></tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        {% set state = 'error' if row.error else ('uncertain' if row.uncertain_fields else ('edited' if row.edited_fields else 'ok')) %}
+        <tr data-id="{{ row.id }}" data-state="{{ state }}" tabindex="-1" aria-selected="false">
+          <td class="list-supplier">
+            <span class="state-dot" aria-hidden="true"></span>
+            {% if row.supplier_name %}{{ row.supplier_name }}{% else %}<span class="muted">{{ row.filename.split('/')[-1] }}</span>{% endif %}
+            <span class="visually-hidden">{{ {'error': 'en erreur', 'uncertain': 'à vérifier', 'edited': 'corrigée', 'ok': ''}[state] }}</span>
+          </td>
+          <td class="muted">{{ row.invoice_date or '—' }}</td>
+          <td class="num">{% if row.total_amount is not none %}{{ row.total_amount | amount }}&nbsp;{{ row.currency or '' }}{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if page_count > 1 %}
+    <nav class="pagination" aria-label="Pages">
+      {% for p in range(1, page_count + 1) %}
+        {% if p == page %}
+          <span class="page-link is-active" aria-current="page">{{ p }}</span>
+        {% else %}
+          <a class="page-link" href="/invoices?{% if page_query %}{{ page_query }}&{% endif %}page={{ p }}">{{ p }}</a>
+        {% endif %}
+      {% endfor %}
+    </nav>
+    {% endif %}
+  </section>
 
-<!-- Document viewer --------------------------------------------------------->
-<div class="modal" id="docModal" hidden>
-  <div class="modal-backdrop" data-close></div>
-  <div class="modal-body doc-body" role="dialog" aria-modal="true" aria-labelledby="docTitle">
-    <header class="modal-head">
-      <span id="docTitle" class="doc-title"></span>
-      <div class="doc-head-actions">
-        <button class="btn btn-ghost btn-sm" id="docPrev" title="Facture precedente du tableau">&larr; Precedente</button>
-        <span id="docPosition" class="muted small"></span>
-        <button class="btn btn-ghost btn-sm" id="docNext" title="Facture suivante du tableau">Suivante &rarr;</button>
-        <a id="docOpen" class="btn btn-ghost btn-sm" target="_blank" rel="noopener">Ouvrir dans un onglet</a>
-        <button class="btn btn-ghost btn-sm" data-close>Fermer</button>
+  <!-- Detail ----------------------------------------------------------------->
+  <section class="card detail-pane" id="detailPane" data-empty aria-labelledby="detailTitle">
+    <header class="detail-head">
+      <button type="button" class="btn btn-ghost btn-sm detail-back" id="detailBack">← Liste</button>
+      <div class="detail-id">
+        <h2 id="detailTitle">Sélectionnez une facture</h2>
+        <p class="muted small" id="detailMeta"></p>
+      </div>
+      <div class="detail-nav">
+        <button type="button" class="btn btn-ghost btn-sm" id="detailPrev" aria-label="Facture précédente">↑</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="detailNext" aria-label="Facture suivante">↓</button>
+        <a class="btn btn-ghost btn-sm" id="detailOpen" target="_blank" rel="noopener" hidden>Ouvrir l'original</a>
       </div>
     </header>
-    <div class="doc-layout">
-      <iframe id="docFrame" title="Facture originale"></iframe>
-      <aside class="doc-fields" aria-label="Champs extraits">
-        <p class="doc-intro">
-          Compare avec le document et corrige si besoin : chaque modification est
-          enregistree des que tu quittes le champ.
-        </p>
-        <p id="docError" class="tag tag-error" hidden></p>
-        {% for fieldname, label, numeric in [('supplier_name', 'Fournisseur', false), ('invoice_number', 'Numero de facture', false), ('invoice_date', 'Date', false), ('total_amount', 'Montant total', true), ('currency', 'Devise', false), ('vat_amount', 'TVA', true)] %}
-        <label class="doc-field {% if numeric %}num{% endif %}" data-field="{{ fieldname }}">
-          <span class="doc-label">{{ label }}<span class="doc-state"></span></span>
-          <input class="doc-input" data-field="{{ fieldname }}"
-                 type="{{ 'date' if fieldname == 'invoice_date' else 'text' }}"
-                 {% if numeric %}inputmode="decimal"{% endif %} autocomplete="off">
-        </label>
-        {% endfor %}
-        <div id="docNotesWrap" class="doc-notes" hidden>
-          <span class="doc-label">Remarques de l'automate</span>
-          <p id="docNotes"></p>
+
+    <div class="viewer" id="viewer">
+      <div class="viewer-stage" id="viewerStage" tabindex="0" aria-label="Document de la facture : glisser pour déplacer, Ctrl + molette pour zoomer">
+        <div class="viewer-canvas" id="viewerCanvas">
+          <img id="viewerImage" alt="" draggable="false">
+          <div class="viewer-regions" id="viewerRegions"></div>
         </div>
-        <p class="legend doc-legend">
-          <span class="swatch swatch-uncertain"></span> a verifier
-          <span class="swatch swatch-edited"></span> corrige a la main
-        </p>
-      </aside>
+        <p class="viewer-empty" id="viewerEmpty" hidden>Document original non conservé.</p>
+      </div>
+      <div class="viewer-bar">
+        <div class="viewer-group">
+          <button type="button" class="btn btn-ghost btn-sm" id="pagePrev" aria-label="Page précédente">‹</button>
+          <span class="muted small" id="pageLabel">1 / 1</span>
+          <button type="button" class="btn btn-ghost btn-sm" id="pageNext" aria-label="Page suivante">›</button>
+        </div>
+        <button type="button" class="btn btn-sm doubt-btn" id="nextDoubt" hidden>Zone douteuse suivante</button>
+        <div class="viewer-group">
+          <button type="button" class="btn btn-ghost btn-sm" id="zoomOut" aria-label="Zoom arrière">−</button>
+          <span class="muted small zoom-level" id="zoomLevel">100 %</span>
+          <button type="button" class="btn btn-ghost btn-sm" id="zoomIn" aria-label="Zoom avant">+</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="zoomFit">Ajuster</button>
+        </div>
+      </div>
     </div>
-  </div>
+
+    <p class="tag tag-error" id="detailError" hidden></p>
+    <div class="detail-fields" id="detailFields">
+      {% for fieldname, label in [('supplier_name', 'Fournisseur'), ('invoice_number', 'Numéro'), ('invoice_date', 'Date'), ('total_amount', 'Montant'), ('currency', 'Devise'), ('vat_amount', 'TVA')] %}
+      <div class="detail-field" data-holder="{{ fieldname }}">
+        <label for="field-{{ fieldname }}">{{ label }}</label>
+        <input id="field-{{ fieldname }}" class="detail-input" data-field="{{ fieldname }}"
+               type="{{ 'date' if fieldname == 'invoice_date' else 'text' }}" autocomplete="off">
+        <button type="button" class="btn btn-sm confirm-btn" data-confirm="{{ fieldname }}" hidden>Confirmer</button>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="detail-notes" id="detailNotes" hidden></p>
+    <div class="detail-actions">
+      <button type="button" class="btn btn-primary" id="validateBtn" hidden>Valider la facture</button>
+      <span class="muted small" id="detailStatus" aria-live="polite"></span>
+    </div>
+  </section>
+</div>
+{% endif %}
+
+<p class="legend small">
+  <span class="swatch swatch-uncertain"></span> Champ à vérifier
+  <span class="swatch swatch-edited"></span> Corrigé à la main
+</p>
+
+<!-- Learned rules: side sheet -------------------------------------------------->
+<div class="sheet" id="rulesPanel" hidden>
+  <div class="sheet-backdrop" data-sheet-close></div>
+  <aside class="sheet-body" role="dialog" aria-modal="true" aria-labelledby="rulesTitle">
+    <header class="sheet-head">
+      <h2 id="rulesTitle">Ce que l'automate a appris</h2>
+      <button type="button" class="btn btn-ghost btn-sm" data-sheet-close>Fermer</button>
+    </header>
+    <p class="hint">
+      Chaque correction ou confirmation est enregistrée. L'automate en déduit des consignes courtes,
+      appliquées automatiquement aux prochains imports du fournisseur.
+    </p>
+    {% if pending_corrections %}
+    <p class="badge badge-warn">{{ pending_corrections }} correction{{ 's' if pending_corrections > 1 else '' }} ou confirmation{{ 's' if pending_corrections > 1 else '' }} en attente</p>
+    {% endif %}
+    <ul class="rules-list" id="rulesList">
+      {% for rule in rules %}
+      <li data-rule="{{ rule.id }}">
+        <span class="rule-scope">{{ rule.supplier_name or 'Toutes factures' }}</span>
+        <span class="rule-text">{{ rule.rule }}</span>
+        <button class="btn btn-ghost btn-sm rule-delete" data-id="{{ rule.id }}">Oublier</button>
+      </li>
+      {% else %}
+      <li class="muted">Aucune règle pour l'instant : corrigez ou confirmez quelques champs pour démarrer l'apprentissage.</li>
+      {% endfor %}
+    </ul>
+    <button class="btn" id="learnBtn">Analyser maintenant</button>
+    <span id="learnStatus" class="muted"></span>
+  </aside>
 </div>
 {% endblock %}
