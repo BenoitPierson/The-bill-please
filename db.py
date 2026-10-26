@@ -626,18 +626,48 @@ def _filter_clause(filters: Dict[str, Any]):
     return (" WHERE " + " AND ".join(where)) if where else "", params
 
 
-def list_invoices(slug: str, filters: Dict[str, Any], limit: int = 500, offset: int = 0):
+# Orders the Invoices list can be sorted by. A whitelist: the key comes from
+# the query string, the value goes into the SQL text.
+SORT_ORDERS = {
+    "date_desc": "invoice_date IS NULL, invoice_date DESC, created_at DESC",
+    "date_asc": "invoice_date IS NULL, invoice_date ASC, created_at ASC",
+    "amount_desc": "total_amount IS NULL, total_amount DESC, created_at DESC",
+    "amount_asc": "total_amount IS NULL, total_amount ASC, created_at ASC",
+}
+
+
+def list_invoices(
+    slug: str, filters: Dict[str, Any], limit: int = 500, offset: int = 0, sort: str = "date_desc"
+):
     clause, params = _filter_clause(filters)
+    order = SORT_ORDERS.get(sort, SORT_ORDERS["date_desc"])
     with connect(slug) as conn:
         rows = conn.execute(
-            "SELECT * FROM invoices{} ORDER BY IFNULL(invoice_date, '') DESC, created_at DESC "
-            "LIMIT ? OFFSET ?".format(clause),
+            "SELECT * FROM invoices{} ORDER BY {}, rowid DESC LIMIT ? OFFSET ?".format(clause, order),
             params + [limit, offset],
         ).fetchall()
         total = conn.execute(
             "SELECT COUNT(*) AS n FROM invoices{}".format(clause), params
         ).fetchone()["n"]
     return rows, total
+
+
+def status_counts(slug: str, filters: Dict[str, Any]) -> Dict[str, int]:
+    """How many invoices each status tab would show, under the other filters."""
+    others = dict(filters)
+    others["status"] = ""
+    clause, params = _filter_clause(others)
+    with connect(slug) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n_all,
+                   SUM(CASE WHEN error IS NULL AND uncertain_fields != '[]' THEN 1 ELSE 0 END) AS n_unc,
+                   SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS n_err
+            FROM invoices{}
+            """.format(clause),
+            params,
+        ).fetchone()
+    return {"all": row["n_all"] or 0, "uncertain": row["n_unc"] or 0, "errors": row["n_err"] or 0}
 
 
 def product_lines(slug: str, filters: Dict[str, Any], limit: int = 100000) -> List[Dict[str, Any]]:
