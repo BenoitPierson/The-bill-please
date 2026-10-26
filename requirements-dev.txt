@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest>=7.4,<8.4
+httpx>=0.27,<0.28
+# Starlette >= 0.47 refuse l'ancienne signature de TemplateResponse utilisee par app.py.
+# Correctif sur une branche separee ; en attendant, borne ici pour que les tests de route tournent.
+starlette>=0.40,<0.47

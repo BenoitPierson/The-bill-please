@@ -85,8 +85,14 @@ def month_label(period: str) -> str:
     return "{} {}".format(MONTH_NAMES.get(month, month), year[2:])
 
 
-def monthly_columns(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """Column chart: invoiced amount per month."""
+def monthly_columns(
+    rows: Sequence[Dict[str, Any]], current_period: Optional[str] = None
+) -> Dict[str, Any]:
+    """Column chart: invoiced amount per month.
+
+    `current_period` marks the month still in progress: it is drawn lighter and
+    never takes the peak label, since a half-elapsed month is not a result.
+    """
     width, height = 720.0, 260.0
     left, right, top, bottom = 64.0, 12.0, 18.0, 30.0
     plot_width = width - left - right
@@ -99,7 +105,8 @@ def monthly_columns(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     maximum = nice_ceiling(max(float(r["amount"]) for r in rows) or 1.0)
     band = plot_width / len(rows)
     thickness = min(BAR_MAX_THICKNESS, max(4.0, band - BAR_GAP))
-    peak = max(rows, key=lambda r: float(r["amount"]))
+    settled = [r for r in rows if r["period"] != current_period and float(r["amount"]) > 0]
+    peak = max(settled or rows, key=lambda r: float(r["amount"]))
 
     bars = []
     for index, row in enumerate(rows):
@@ -114,11 +121,13 @@ def monthly_columns(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                 "radius": min(BAR_RADIUS, thickness / 2),
                 "center": left + band * index + band / 2,
                 "label": month_label(row["period"]),
+                "period": row["period"],
+                "is_current": row["period"] == current_period,
                 "amount": amount,
                 "amount_text": format_amount(amount),
                 "count": row["invoice_count"],
                 # Only the peak is labelled directly; the axis carries the rest.
-                "show_value": row["period"] == peak["period"],
+                "show_value": row["period"] == peak["period"] and row["period"] != current_period,
                 "value_text": format_compact(amount),
                 # Every third label when months get crowded, to avoid collisions.
                 "show_label": len(rows) <= 14 or index % 2 == 0,
@@ -148,14 +157,14 @@ def monthly_columns(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 # colour-blind reader. Values are never colour-only: every cell carries them in
 # its tooltip.
 HEAT_STOPS = (
-    (0.00, (233, 245, 225)),
-    (0.25, (207, 230, 164)),
-    (0.50, (240, 191, 74)),
-    (0.75, (222, 108, 53)),
-    (1.00, (168, 31, 26)),
+    (0.00, (226, 238, 222)),
+    (0.25, (196, 218, 170)),
+    (0.50, (222, 196, 128)),
+    (0.75, (200, 128, 92)),
+    (1.00, (150, 70, 58)),
 )
 # Past this level the fill is dark enough that ink has to flip to white.
-HEAT_DARK_FROM = 0.68
+HEAT_DARK_FROM = 0.75
 
 
 def heat_color(level: float) -> str:
@@ -187,12 +196,11 @@ def day_label(day: str) -> str:
 def daily_heatmap(
     rows: Sequence[Dict[str, Any]], max_days: int = 45, max_suppliers: int = 12
 ) -> Dict[str, Any]:
-    """Grid of (day x supplier) amounts, in absolute and relative shades.
+    """Grid of (day x supplier) amounts, shaded against the grid's maximum.
 
-    Both scales are computed here rather than in the browser: absolute compares
-    cells across the whole grid, relative compares a supplier to its own busiest
-    day, which is the only way a small supplier's rhythm is visible next to a
-    large one. The template draws both fills and the toggle swaps them.
+    Each cell also carries what its tooltip says: the invoices behind it, the
+    day's total across every supplier (hidden ones included) and the share of
+    that day in the supplier's calendar month.
     """
     label_width = 168.0
     cell_width, row_height = 18.0, 22.0
@@ -205,6 +213,14 @@ def daily_heatmap(
     ]
     if not entries:
         return {"empty": True, "width": 720.0, "height": 80.0}
+
+    day_totals: Dict[str, float] = {}
+    month_totals: Dict[tuple, float] = {}
+    for row in entries:
+        amount = float(row["amount"])
+        day_totals[row["day"]] = day_totals.get(row["day"], 0.0) + amount
+        key = (row["supplier"], row["day"][:7])
+        month_totals[key] = month_totals.get(key, 0.0) + amount
 
     totals: Dict[str, float] = {}
     for row in entries:
@@ -222,37 +238,39 @@ def daily_heatmap(
         key = (row["supplier"], row["day"])
         if row["supplier"] not in kept or row["day"] not in day_index:
             continue
-        cell = grid.setdefault(key, {"amount": 0.0, "count": 0})
+        cell = grid.setdefault(key, {"amount": 0.0, "count": 0, "numbers": []})
         cell["amount"] += float(row["amount"])
         cell["count"] += int(row.get("invoice_count") or 0)
+        cell["numbers"].extend(row.get("invoice_numbers") or [])
 
     overall_max = max((c["amount"] for c in grid.values()), default=0.0) or 1.0
-    supplier_max = {name: 0.0 for name in suppliers}
-    for (supplier, _), cell in grid.items():
-        supplier_max[supplier] = max(supplier_max[supplier], cell["amount"])
 
     cells = []
     for row_index, supplier in enumerate(suppliers):
-        peak = supplier_max.get(supplier) or 1.0
         for (cell_supplier, day), cell in grid.items():
             if cell_supplier != supplier:
                 continue
             amount = cell["amount"]
-            share = amount / peak if peak else 0.0
+            month_total = month_totals.get((supplier, day[:7])) or 0.0
             cells.append(
                 {
                     "x": label_width + cell_width * day_index[day] + gap / 2,
                     "y": grid_top + row_height * row_index + gap / 2,
                     "width": cell_width - gap,
                     "height": row_height - gap,
-                    "fill_abs": heat_color(amount / overall_max),
-                    "fill_rel": heat_color(share),
+                    "fill": heat_color(amount / overall_max),
                     "supplier": supplier,
                     "day": day,
+                    "date_text": day_label(day),
                     "label": "{} · {}".format(day_label(day), supplier),
-                    "value_abs": format_amount(amount),
-                    "value_rel": format_percent(share * 100),
+                    "amount_text": format_amount(amount),
                     "count": cell["count"],
+                    # Numbers are listed only while they stay readable in a tooltip.
+                    "numbers": cell["numbers"] if len(cell["numbers"]) <= 3 else [],
+                    "day_total_text": format_amount(day_totals.get(day, 0.0)),
+                    "month_share_text": format_percent(
+                        (amount / month_total * 100) if month_total else 0.0
+                    ),
                 }
             )
 
@@ -272,7 +290,6 @@ def daily_heatmap(
         {
             "fill": heat_color(level),
             "abs_label": format_compact(overall_max * level),
-            "rel_label": format_percent(level * 100),
         }
         for level in (0.0, 0.25, 0.5, 0.75, 1.0)
     ]

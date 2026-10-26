@@ -7,16 +7,16 @@
 <link rel="stylesheet" href="{{ static_url('app.css') }}">
 </head>
 <body data-pending-summary="{{ pending_summary or '' }}" data-active-tab="{{ active_tab }}">
-<header class="topbar">
+<header class="topbar" id="topbar">
   <div class="topbar-inner">
     <div class="brand">
       <span class="brand-mark">§</span>
       <span class="brand-name">{{ tenant_name }}</span>
     </div>
-    <nav class="tabs">
-      <a href="/dashboard" class="tab {% if active_tab == 'dashboard' %}is-active{% endif %}">Dashboard</a>
-      <a href="/invoices" class="tab {% if active_tab == 'invoices' %}is-active{% endif %}">Invoices</a>
-      <a href="/products" class="tab {% if active_tab == 'products' %}is-active{% endif %}">Products</a>
+    <nav class="tabs" aria-label="Navigation principale">
+      <a href="/dashboard" class="tab {% if active_tab == 'dashboard' %}is-active{% endif %}">Tableau de bord</a>
+      <a href="/invoices" class="tab {% if active_tab == 'invoices' %}is-active{% endif %}">Factures</a>
+      <a href="/products" class="tab {% if active_tab == 'products' %}is-active{% endif %}">Produits</a>
     </nav>
     <form class="account" method="post" action="/logout">
       <span class="account-email">{{ user_email }}</span>

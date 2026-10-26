@@ -7,6 +7,16 @@
   const $ = (selector, root) => (root || document).querySelector(selector);
   const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
 
+  /* ------------------------------------------------- top bar scroll edge */
+
+  // The bar is translucent; its edge appears only once content slides under it.
+  const topbar = $("#topbar");
+  if (topbar) {
+    const syncEdge = () => topbar.classList.toggle("is-scrolled", window.scrollY > 4);
+    window.addEventListener("scroll", syncEdge, { passive: true });
+    syncEdge();
+  }
+
   /* ------------------------------------------------------------- import */
 
   const importPanel = $("#importPanel");
@@ -702,31 +712,42 @@
     });
   }
 
-  /* ---------------------------------------------------------- heatmap */
+  /* ------------------------------------------------ home: live import */
 
-  // Absolute compares every cell on one scale; relative divides each cell by
-  // its own supplier's busiest day. Both fills are computed server-side and
-  // carried on the cell, so switching is a repaint, not a reload.
-  const heatCard = $("#heatmapCard");
-  if (heatCard) {
-    const setMode = (mode) => {
-      heatCard.dataset.mode = mode;
-      $$(".heat-cell", heatCard).forEach((cell) => {
-        cell.setAttribute("fill", cell.dataset[mode === "rel" ? "fillRel" : "fillAbs"]);
-      });
-      $$("[data-heat-mode]", heatCard).forEach((button) => {
-        const active = button.dataset.heatMode === mode;
-        button.classList.toggle("is-active", active);
-        button.setAttribute("aria-pressed", active ? "true" : "false");
-      });
-      $$("[data-heat-sub], [data-heat-legend]", heatCard).forEach((node) => {
-        node.hidden = (node.dataset.heatSub || node.dataset.heatLegend) !== mode;
-      });
+  // While an import runs, the home card follows it; once it ends, the page
+  // reloads so the finished counts (and the import summary) appear.
+  const liveImport = $("[data-batch-progress]");
+  if (liveImport) {
+    const batchId = liveImport.dataset.batchProgress;
+    const total = Number(liveImport.dataset.total) || 0;
+    const tick = async () => {
+      try {
+        const response = await fetch(`/api/batches/${encodeURIComponent(batchId)}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.status !== "running") { window.location.reload(); return; }
+        $("[data-batch-done]", liveImport).textContent = String(data.done);
+        $("[data-batch-bar]", liveImport).style.transform = `scaleX(${total ? data.done / total : 0})`;
+        const eta = Number(data.eta_seconds) || 0;
+        $("[data-batch-eta]", liveImport).textContent = eta < 60
+          ? "moins d'une minute restante"
+          : `environ ${Math.ceil(eta / 60)} min restantes`;
+        setTimeout(tick, 2000);
+      } catch (error) {
+        setTimeout(tick, 5000);
+      }
     };
-    $$("[data-heat-mode]", heatCard).forEach((button) => {
-      button.addEventListener("click", () => setMode(button.dataset.heatMode));
-    });
+    setTimeout(tick, 2000);
   }
+
+  /* ---------------------------------------------- home: recent invoices */
+
+  $$("tr.is-link[data-href]").forEach((row) => {
+    row.addEventListener("click", (event) => {
+      if (event.target.closest("a")) return; // the number link handles itself
+      window.open(row.dataset.href, "_blank", "noopener");
+    });
+  });
 
   /* ------------------------------------------------------ chart tooltips */
 
@@ -739,7 +760,11 @@
       const strong = document.createElement("b");
       strong.textContent = label;
       tooltip.appendChild(strong);
-      tooltip.appendChild(document.createTextNode(value));
+      if (Array.isArray(value)) {
+        value.forEach((text) => tooltip.appendChild(el("span", "tip-line", text)));
+      } else {
+        tooltip.appendChild(document.createTextNode(value));
+      }
       tooltip.hidden = false;
       const box = tooltip.getBoundingClientRect();
       tooltip.style.left = Math.min(event.clientX + 14, window.innerWidth - box.width - 10) + "px";
@@ -753,10 +778,19 @@
       dot.addEventListener("mouseleave", () => { tooltip.hidden = true; });
     });
 
+    // Every value comes from data-* attributes Jinja escaped, and goes back
+    // out through textContent: a supplier name is never parsed as HTML.
+    const heatLines = (data) => {
+      const count = Number(data.count) || 0;
+      const lines = [`${data.amount} · ${count} facture${count > 1 ? "s" : ""}`];
+      if (data.numbers) lines.push(`N° ${data.numbers}`);
+      lines.push(`Total du jour : ${data.dayTotal}`);
+      lines.push(`${data.share} de son mois`);
+      return lines;
+    };
     $$(".heat-cell").forEach((cell) => {
       cell.addEventListener("mousemove", (event) => {
-        const relative = heatCard && heatCard.dataset.mode === "rel";
-        showTip(event, cell.dataset.label, relative ? cell.dataset.valueRel : cell.dataset.valueAbs);
+        showTip(event, `${cell.dataset.date} · ${cell.dataset.supplier}`, heatLines(cell.dataset));
       });
       cell.addEventListener("mouseleave", () => { tooltip.hidden = true; });
     });
