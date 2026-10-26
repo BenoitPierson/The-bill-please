@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -722,21 +722,59 @@ async def api_edit_invoice(request: Request, invoice_id: str) -> Response:
     )
     logger.info("[%s] correction par %s : %s de la facture %s", slug, email, field, invoice_id)
 
-    pending = db.count_pending_corrections(slug)
-    learned = None
-    if pending >= AUTO_LEARN_THRESHOLD:
-        # Enough signal accumulated: distill the corrections into rules now, so
-        # the very next import already benefits from them.
-        learned = learning.refresh_rules(get_client(), slug)
-
+    pending, learned = _after_review(slug)
     return JSONResponse(
-        {
-            "status": "ok",
-            "value": value,
-            "pending_corrections": db.count_pending_corrections(slug),
-            "learned": learned,
-        }
+        {"status": "ok", "value": value, "pending_corrections": pending, "learned": learned}
     )
+
+
+def _after_review(slug: str) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """Pending corrections/confirmations, and the learning run they may trigger."""
+    learned = None
+    if db.count_pending_corrections(slug) >= AUTO_LEARN_THRESHOLD:
+        # Enough signal accumulated: distill it into rules now, so the very
+        # next import already benefits from them.
+        learned = learning.refresh_rules(get_client(), slug)
+    return db.count_pending_corrections(slug), learned
+
+
+def _review_response(slug: str, invoice_id: str, fields: List[str], email: str) -> Response:
+    try:
+        state = db.confirm_fields(slug, invoice_id, fields, email)
+    except LookupError:
+        return JSONResponse({"error": "Facture introuvable."}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    pending, learned = _after_review(slug)
+    state.update({"status": "ok", "pending_corrections": pending, "learned": learned})
+    return JSONResponse(state)
+
+
+@app.post("/api/invoices/{invoice_id}/confirm")
+async def api_confirm_field(request: Request, invoice_id: str) -> Response:
+    """The doubtful value is right as extracted: drop the doubt, remember it."""
+    slug, email, redirect = _require_login(request)
+    if redirect is not None:
+        return JSONResponse({"error": "Session expiree."}, status_code=401)
+    payload = await request.json()
+    field = payload.get("field") if isinstance(payload, dict) else None
+    if not isinstance(field, str):
+        return JSONResponse({"error": "Champ manquant."}, status_code=400)
+    return _review_response(slug, invoice_id, [field], email)
+
+
+@app.post("/api/invoices/{invoice_id}/validate")
+def api_validate_invoice(request: Request, invoice_id: str) -> Response:
+    """Every remaining doubtful value of the invoice is confirmed."""
+    slug, email, redirect = _require_login(request)
+    if redirect is not None:
+        return JSONResponse({"error": "Session expiree."}, status_code=401)
+    invoice = db.get_invoice(slug, invoice_id)
+    if invoice is None:
+        return JSONResponse({"error": "Facture introuvable."}, status_code=404)
+    if invoice["error"]:
+        return JSONResponse({"error": "Une facture en erreur ne peut pas etre validee."}, status_code=400)
+    return _review_response(slug, invoice_id, json.loads(invoice["uncertain_fields"] or "[]"), email)
 
 
 @app.post("/api/learn")

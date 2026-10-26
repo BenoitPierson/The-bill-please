@@ -40,12 +40,21 @@ INV025554" ne l'est pas.
 plutot que d'ajouter une seconde consigne.
 - Si les corrections sont trop heterogenes ou trop peu nombreuses pour en tirer une regle \
 fiable, reponds exactement : AUCUNE REGLE
-- Ne parle jamais d'une facture en particulier : la consigne doit valoir pour les suivantes."""
+- Ne parle jamais d'une facture en particulier : la consigne doit valoir pour les suivantes.
+- Une "confirmation" signifie que la valeur extraite etait juste alors que l'extraction en doutait : la consigne peut indiquer de ne plus douter de ce champ pour ce fournisseur."""
 
 
 def _format_corrections(corrections: Sequence) -> str:
     lines = []
     for correction in corrections:
+        kind = correction["kind"] if "kind" in correction.keys() else "correction"
+        if kind == "confirmation":
+            lines.append(
+                "- champ {} : valeur \"{}\" signalée douteuse, confirmée exacte".format(
+                    correction["field"], (correction["new_value"] or "(vide)")[:120]
+                )
+            )
+            continue
         lines.append(
             "- champ {} : extrait \"{}\" -> corrige en \"{}\"".format(
                 correction["field"],

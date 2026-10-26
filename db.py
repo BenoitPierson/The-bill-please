@@ -681,27 +681,66 @@ def update_invoice_field(slug: str, invoice_id: str, field: str, value: Any) -> 
 
     with connect(slug) as conn:
         row = conn.execute(
-            "SELECT uncertain_fields, edited_fields FROM invoices WHERE id = ?", (invoice_id,)
+            "SELECT uncertain_fields, uncertain_regions, edited_fields FROM invoices WHERE id = ?",
+            (invoice_id,),
         ).fetchone()
         if row is None:
             raise LookupError("Facture introuvable")
 
         edited = set(json.loads(row["edited_fields"] or "[]"))
         edited.add(field)
-        # A hand-corrected value is no longer doubtful.
+        # A hand-corrected value is no longer doubtful, and its box goes with the doubt.
         uncertain = [f for f in json.loads(row["uncertain_fields"] or "[]") if f != field]
+        regions = [r for r in json.loads(row["uncertain_regions"] or "[]") if r.get("field") != field]
 
         conn.execute(
-            "UPDATE invoices SET {} = ?, edited_fields = ?, uncertain_fields = ?, updated_at = ? "
-            "WHERE id = ?".format(field),
+            "UPDATE invoices SET {} = ?, edited_fields = ?, uncertain_fields = ?, uncertain_regions = ?,"
+            " updated_at = ? WHERE id = ?".format(field),
             (
                 value,
                 json.dumps(sorted(edited), ensure_ascii=False),
                 json.dumps(uncertain, ensure_ascii=False),
+                json.dumps(regions, ensure_ascii=False),
                 now(),
                 invoice_id,
             ),
         )
+
+
+def confirm_fields(
+    slug: str, invoice_id: str, fields: Sequence[str], user_email: str
+) -> Dict[str, Any]:
+    """Mark doubtful values as checked and right, without changing them.
+
+    Each confirmation is logged like a correction (kind 'confirmation'), so the
+    learning loop also hears where the extraction doubted for nothing.
+    """
+    with connect(slug) as conn:
+        row = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+        if row is None:
+            raise LookupError("Facture introuvable")
+        uncertain = json.loads(row["uncertain_fields"] or "[]")
+        for field in fields:
+            if field not in EDITABLE_FIELDS:
+                raise ValueError("Champ non modifiable : {}".format(field))
+            if field not in uncertain:
+                raise ValueError("Ce champ n'est pas signale comme douteux : {}".format(field))
+        confirmed = set(fields)
+        remaining = [f for f in uncertain if f not in confirmed]
+        regions = [r for r in json.loads(row["uncertain_regions"] or "[]") if r.get("field") not in confirmed]
+        conn.execute(
+            "UPDATE invoices SET uncertain_fields = ?, uncertain_regions = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(remaining, ensure_ascii=False), json.dumps(regions, ensure_ascii=False),
+             now(), invoice_id),
+        )
+        for field in fields:
+            value = "" if row[field] is None else str(row[field])
+            conn.execute(
+                "INSERT INTO corrections (invoice_id, supplier_name, field, old_value, new_value,"
+                " user_email, created_at, kind) VALUES (?,?,?,?,?,?,?, 'confirmation')",
+                (invoice_id, row["supplier_name"], field, value, value, user_email, now()),
+            )
+    return {"uncertain_fields": remaining, "uncertain_regions": regions}
 
 
 def distinct_suppliers(slug: str) -> List[str]:
@@ -724,13 +763,14 @@ def record_correction(
     old_value: Any,
     new_value: Any,
     user_email: str,
+    kind: str = "correction",
 ) -> None:
     with connect(slug) as conn:
         conn.execute(
             """
             INSERT INTO corrections
-                (invoice_id, supplier_name, field, old_value, new_value, user_email, created_at)
-            VALUES (?,?,?,?,?,?,?)
+                (invoice_id, supplier_name, field, old_value, new_value, user_email, created_at, kind)
+            VALUES (?,?,?,?,?,?,?,?)
             """,
             (
                 invoice_id,
@@ -740,6 +780,7 @@ def record_correction(
                 "" if new_value is None else str(new_value),
                 user_email,
                 now(),
+                kind,
             ),
         )
 
