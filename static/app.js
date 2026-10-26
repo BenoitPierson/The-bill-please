@@ -754,6 +754,327 @@
     select(wanted && rowFor(wanted) ? wanted : rows[0] && rows[0].dataset.id);
   }
 
+  /* ------------------------------------------------------------- viewer */
+
+  // The original as page images, with the doubtful areas drawn on top. One
+  // transform (translate + scale) moves the page and its boxes together, so
+  // the boxes — placed in percentages of the page — never need recomputing.
+  // Every motion starts from the value on screen and can be grabbed mid-way.
+  const viewerStage = $("#viewerStage");
+  if (viewerStage && detailPane) {
+    const canvas = $("#viewerCanvas");
+    const image = $("#viewerImage");
+    const layer = $("#viewerRegions");
+    const emptyEl = $("#viewerEmpty");
+    const pageLabel = $("#pageLabel");
+    const zoomLabel = $("#zoomLevel");
+    const doubtBtn = $("#nextDoubt");
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const MIN_ZOOM = 0.5;
+    const MAX_ZOOM = 4;
+
+    const view = { id: null, pages: 0, page: 1, regions: [], width: 0, height: 0, fit: 1, z: 1, tx: 0, ty: 0 };
+    let doubtIndex = -1;
+    let animation = null;
+
+    const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+    const stageSize = () => ({ w: viewerStage.clientWidth, h: viewerStage.clientHeight });
+    const scale = () => view.fit * view.z;
+
+    function apply() {
+      canvas.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${scale()})`;
+      zoomLabel.textContent = `${Math.round(view.z * 100)} %`;
+    }
+
+    // Where the page may rest: centred when smaller than the stage, edge to
+    // edge otherwise.
+    function bounds(z) {
+      const { w, h } = stageSize();
+      const cw = view.width * view.fit * z;
+      const ch = view.height * view.fit * z;
+      return {
+        minX: cw <= w ? (w - cw) / 2 : w - cw, maxX: cw <= w ? (w - cw) / 2 : 0,
+        minY: ch <= h ? (h - ch) / 2 : h - ch, maxY: ch <= h ? (h - ch) / 2 : 0,
+      };
+    }
+
+    // Past an edge the page follows less and less (Apple's rubber band).
+    function rubberband(overshoot, dimension) {
+      const c = 0.55;
+      return (overshoot * dimension * c) / (dimension + c * Math.abs(overshoot));
+    }
+    function soft(value, low, high, dimension) {
+      if (value < low) return low - rubberband(low - value, dimension);
+      if (value > high) return high + rubberband(value - high, dimension);
+      return value;
+    }
+
+    function stop() {
+      if (animation) cancelAnimationFrame(animation);
+      animation = null;
+    }
+
+    // Critically damped spring (no overshoot), from the values on screen.
+    function animateTo(target) {
+      stop();
+      if (reduceMotion.matches) {
+        Object.assign(view, target);
+        apply();
+        return;
+      }
+      const omega = (2 * Math.PI) / 0.35;
+      const from = { z: view.z, tx: view.tx, ty: view.ty };
+      const start = performance.now();
+      const frame = (now) => {
+        const t = (now - start) / 1000;
+        const decay = (1 + omega * t) * Math.exp(-omega * t);
+        ["z", "tx", "ty"].forEach((key) => {
+          view[key] = target[key] + (from[key] - target[key]) * decay;
+        });
+        apply();
+        if (decay > 0.001) {
+          animation = requestAnimationFrame(frame);
+        } else {
+          Object.assign(view, target);
+          apply();
+          animation = null;
+        }
+      };
+      animation = requestAnimationFrame(frame);
+    }
+
+    function settled(z) {
+      const b = bounds(z);
+      return { z, tx: clamp(view.tx, b.minX, b.maxX), ty: clamp(view.ty, b.minY, b.maxY) };
+    }
+
+    function zoomAround(newZ, px, py, animate) {
+      const z = clamp(newZ, MIN_ZOOM, MAX_ZOOM);
+      const cx = (px - view.tx) / scale();
+      const cy = (py - view.ty) / scale();
+      const target = { z, tx: px - cx * view.fit * z, ty: py - cy * view.fit * z };
+      const b = bounds(z);
+      target.tx = clamp(target.tx, b.minX, b.maxX);
+      target.ty = clamp(target.ty, b.minY, b.maxY);
+      if (animate) animateTo(target);
+      else { stop(); Object.assign(view, target); apply(); }
+    }
+
+    function fitPage(animate) {
+      const target = { z: 1, tx: 0, ty: 0 };
+      const b = bounds(1);
+      target.tx = b.minX;
+      target.ty = b.minY;
+      if (animate) animateTo(target);
+      else { Object.assign(view, target); apply(); }
+    }
+
+    function measure() {
+      const { w, h } = stageSize();
+      if (!view.width || !w) return;
+      view.fit = Math.min(w / view.width, h / view.height);
+      canvas.style.width = `${view.width}px`;
+      canvas.style.height = `${view.height}px`;
+    }
+
+    function drawRegions() {
+      layer.textContent = "";
+      view.regions.forEach((region, index) => {
+        if (region.page !== view.page) return;
+        const box = el("div", "region");
+        box.dataset.field = region.field;
+        box.dataset.index = String(index);
+        box.style.left = `${region.x * 100}%`;
+        box.style.top = `${region.y * 100}%`;
+        box.style.width = `${region.width * 100}%`;
+        box.style.height = `${region.height * 100}%`;
+        if (index === doubtIndex) box.classList.add("is-active");
+        box.addEventListener("click", (event) => {
+          event.stopPropagation();
+          const input = $(`#field-${region.field}`);
+          if (input) input.focus();
+        });
+        layer.appendChild(box);
+      });
+      doubtBtn.hidden = !view.regions.length;
+    }
+
+    function showPage(page, then) {
+      view.page = clamp(page, 1, Math.max(1, view.pages));
+      pageLabel.textContent = `${view.page} / ${view.pages}`;
+      $("#pagePrev").disabled = view.page <= 1;
+      $("#pageNext").disabled = view.page >= view.pages;
+      const requested = `/invoices/${encodeURIComponent(view.id)}/pages/${view.page}.png`;
+      image.onload = () => {
+        if (image.getAttribute("src") !== requested) return;
+        view.width = image.naturalWidth;
+        view.height = image.naturalHeight;
+        measure();
+        drawRegions();
+        if (then) then(); else fitPage(false);
+      };
+      image.setAttribute("src", requested);
+    }
+
+    function sortedRegions(regions) {
+      return regions.slice().sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x);
+    }
+
+    function focusRegion(index) {
+      const region = view.regions[index];
+      if (!region) return;
+      doubtIndex = index;
+      const go = () => {
+        drawRegions();
+        const { w, h } = stageSize();
+        const z = clamp((0.6 * w) / (region.width * view.width * view.fit), 1, MAX_ZOOM);
+        const s = view.fit * z;
+        animateTo({
+          z,
+          tx: w / 2 - (region.x + region.width / 2) * view.width * s,
+          ty: h / 2 - (region.y + region.height / 2) * view.height * s,
+        });
+      };
+      if (region.page !== view.page) showPage(region.page, go);
+      else go();
+    }
+
+    detailPane.addEventListener("invoice:selected", (event) => {
+      const data = event.detail.data;
+      stop();
+      view.id = data.id;
+      view.pages = data.page_count || 0;
+      view.regions = sortedRegions(data.uncertain_regions || []);
+      doubtIndex = -1;
+      const hasDocument = Boolean(data.document_kind) && view.pages > 0;
+      emptyEl.hidden = hasDocument;
+      canvas.hidden = !hasDocument;
+      $$(".viewer-bar button", detailPane).forEach((button) => { button.disabled = !hasDocument; });
+      if (!hasDocument) {
+        layer.textContent = "";
+        image.removeAttribute("src");
+        doubtBtn.hidden = true;
+        pageLabel.textContent = "–";
+        return;
+      }
+      showPage(1);
+    });
+
+    detailPane.addEventListener("invoice:regions", (event) => {
+      if (event.detail.id !== view.id) return;
+      view.regions = sortedRegions(event.detail.regions || []);
+      doubtIndex = -1;
+      drawRegions();
+    });
+
+    detailPane.addEventListener("region:focus", (event) => {
+      $$(".region", layer).forEach((box) => {
+        box.classList.toggle("is-hot", box.dataset.field === event.detail.field);
+      });
+    });
+
+    doubtBtn.addEventListener("click", () => focusRegion((doubtIndex + 1) % view.regions.length));
+    $("#pagePrev").addEventListener("click", () => showPage(view.page - 1));
+    $("#pageNext").addEventListener("click", () => showPage(view.page + 1));
+    const centre = () => { const { w, h } = stageSize(); return [w / 2, h / 2]; };
+    $("#zoomIn").addEventListener("click", () => zoomAround(view.z * 1.25, ...centre(), true));
+    $("#zoomOut").addEventListener("click", () => zoomAround(view.z / 1.25, ...centre(), true));
+    $("#zoomFit").addEventListener("click", () => fitPage(true));
+
+    // Ctrl + wheel (and trackpad pinch, which browsers report the same way)
+    // zooms around the pointer; a plain wheel pans once the page overflows.
+    viewerStage.addEventListener("wheel", (event) => {
+      if (!view.width) return;
+      const rect = viewerStage.getBoundingClientRect();
+      if (event.ctrlKey) {
+        event.preventDefault();
+        zoomAround(view.z * Math.exp(-event.deltaY * 0.002), event.clientX - rect.left, event.clientY - rect.top, false);
+        return;
+      }
+      const b = bounds(view.z);
+      if (b.minY === b.maxY && b.minX === b.maxX) return; // nothing to pan: let the page scroll
+      event.preventDefault();
+      stop();
+      view.tx = clamp(view.tx - event.deltaX, b.minX, b.maxX);
+      view.ty = clamp(view.ty - event.deltaY, b.minY, b.maxY);
+      apply();
+    }, { passive: false });
+
+    // Drag to pan (1:1, keeping the grab point), two fingers to pinch-zoom.
+    const pointers = new Map();
+    let drag = null;
+    let pinch = null;
+    viewerStage.addEventListener("pointerdown", (event) => {
+      if (!view.width || event.button > 0) return;
+      stop();
+      viewerStage.setPointerCapture(event.pointerId);
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointers.size === 1) {
+        drag = { x: event.clientX, y: event.clientY, tx: view.tx, ty: view.ty };
+        viewerStage.classList.add("is-dragging");
+      } else if (pointers.size === 2) {
+        const [a, b] = Array.from(pointers.values());
+        pinch = { distance: Math.hypot(a.x - b.x, a.y - b.y), z: view.z };
+        drag = null;
+      }
+    });
+    viewerStage.addEventListener("pointermove", (event) => {
+      if (!pointers.has(event.pointerId)) return;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pinch && pointers.size === 2) {
+        const [a, b] = Array.from(pointers.values());
+        const rect = viewerStage.getBoundingClientRect();
+        const distance = Math.hypot(a.x - b.x, a.y - b.y);
+        zoomAround(pinch.z * (distance / pinch.distance), (a.x + b.x) / 2 - rect.left, (a.y + b.y) / 2 - rect.top, false);
+      } else if (drag) {
+        const bnd = bounds(view.z);
+        const { w, h } = stageSize();
+        view.tx = soft(drag.tx + event.clientX - drag.x, bnd.minX, bnd.maxX, w);
+        view.ty = soft(drag.ty + event.clientY - drag.y, bnd.minY, bnd.maxY, h);
+        apply();
+      }
+    });
+    const release = (event) => {
+      if (!pointers.has(event.pointerId)) return;
+      pointers.delete(event.pointerId);
+      if (pointers.size < 2) pinch = null;
+      if (pointers.size === 0) {
+        drag = null;
+        viewerStage.classList.remove("is-dragging");
+        animateTo(settled(view.z)); // spring back inside the edges
+      }
+    };
+    viewerStage.addEventListener("pointerup", release);
+    viewerStage.addEventListener("pointercancel", release);
+
+    // Keyboard on the focused document: no animation, ever.
+    viewerStage.addEventListener("keydown", (event) => {
+      const [cx, cy] = centre();
+      if (event.key === "+" || event.key === "=") zoomAround(view.z * 1.25, cx, cy, false);
+      else if (event.key === "-") zoomAround(view.z / 1.25, cx, cy, false);
+      else if (event.key === "0") fitPage(false);
+      else if (event.key.startsWith("Arrow")) {
+        const b = bounds(view.z);
+        const delta = 60;
+        if (event.key === "ArrowLeft") view.tx = clamp(view.tx + delta, b.minX, b.maxX);
+        if (event.key === "ArrowRight") view.tx = clamp(view.tx - delta, b.minX, b.maxX);
+        if (event.key === "ArrowUp") view.ty = clamp(view.ty + delta, b.minY, b.maxY);
+        if (event.key === "ArrowDown") view.ty = clamp(view.ty - delta, b.minY, b.maxY);
+        stop();
+        apply();
+      } else return;
+      event.preventDefault();
+    });
+
+    window.addEventListener("resize", () => {
+      if (!view.width) return;
+      measure();
+      const target = settled(view.z);
+      Object.assign(view, target);
+      apply();
+    });
+  }
+
   /* --------------------------------------------------------- products */
 
   // The alert threshold is a reading choice, not a query: every row already

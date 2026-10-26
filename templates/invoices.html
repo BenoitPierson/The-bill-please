@@ -164,7 +164,29 @@
       </div>
     </header>
 
-    <div class="viewer" id="viewer"></div>
+    <div class="viewer" id="viewer">
+      <div class="viewer-stage" id="viewerStage" tabindex="0" aria-label="Document de la facture : glisser pour déplacer, Ctrl + molette pour zoomer">
+        <div class="viewer-canvas" id="viewerCanvas">
+          <img id="viewerImage" alt="" draggable="false">
+          <div class="viewer-regions" id="viewerRegions"></div>
+        </div>
+        <p class="viewer-empty" id="viewerEmpty" hidden>Document original non conservé.</p>
+      </div>
+      <div class="viewer-bar">
+        <div class="viewer-group">
+          <button type="button" class="btn btn-ghost btn-sm" id="pagePrev" aria-label="Page précédente">‹</button>
+          <span class="muted small" id="pageLabel">1 / 1</span>
+          <button type="button" class="btn btn-ghost btn-sm" id="pageNext" aria-label="Page suivante">›</button>
+        </div>
+        <button type="button" class="btn btn-sm doubt-btn" id="nextDoubt" hidden>Zone douteuse suivante</button>
+        <div class="viewer-group">
+          <button type="button" class="btn btn-ghost btn-sm" id="zoomOut" aria-label="Zoom arrière">−</button>
+          <span class="muted small zoom-level" id="zoomLevel">100 %</span>
+          <button type="button" class="btn btn-ghost btn-sm" id="zoomIn" aria-label="Zoom avant">+</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="zoomFit">Ajuster</button>
+        </div>
+      </div>
+    </div>
 
     <p class="tag tag-error" id="detailError" hidden></p>
     <div class="detail-fields" id="detailFields">
