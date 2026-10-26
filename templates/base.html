@@ -18,10 +18,14 @@
       <a href="/invoices" class="tab {% if active_tab == 'invoices' %}is-active{% endif %}">Factures</a>
       <a href="/products" class="tab {% if active_tab == 'products' %}is-active{% endif %}">Produits</a>
     </nav>
+    {% if local_mode %}
+    <span class="account account-email" title="Connexion désactivée : application utilisée sur ce poste uniquement">Poste local</span>
+    {% else %}
     <form class="account" method="post" action="/logout">
       <span class="account-email">{{ user_email }}</span>
       <button type="submit" class="btn btn-ghost">Deconnexion</button>
     </form>
+    {% endif %}
   </div>
 </header>
 

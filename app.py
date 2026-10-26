@@ -38,6 +38,7 @@ from config import (
     AUTO_LEARN_THRESHOLD,
     BASE_DIR,
     DEFAULT_TENANT,
+    LOCAL_HOSTS,
     MAX_UPLOAD_MB,
     SESSION_COOKIE,
     SESSION_HTTPS_ONLY,
@@ -141,6 +142,29 @@ def current_tenant(request: Request) -> Optional[str]:
     return slug if tenants.exists(slug) else None
 
 
+# Identity used for everything recorded while the login step is skipped
+# (import author, correction author, whose import summary to show).
+LOCAL_IDENTITY = "Poste local"
+
+
+def local_mode(request: Request) -> bool:
+    """True when the login step is skipped: a purely local run.
+
+    Both conditions are required. No APP_DOMAIN means the platform is not
+    deployed, and a loopback Host means the page is requested from this very
+    machine. As soon as either changes (a production domain, another computer
+    on the network), the normal login comes back on its own.
+    """
+    if tenants.APP_DOMAIN:
+        return False
+    host = (request.headers.get("host") or "").strip().lower()
+    if host.startswith("["):  # IPv6 literal: [::1]:8000
+        host = host[1:].split("]")[0]
+    else:
+        host = host.split(":")[0]
+    return host.rstrip(".") in LOCAL_HOSTS and host != "0.0.0.0"
+
+
 def current_user(request: Request, slug: str) -> Optional[str]:
     session = request.session
     # The session must belong to the tenant being addressed, so a cookie can
@@ -182,6 +206,7 @@ def _page_context(request: Request, slug: str, email: str, active: str) -> Dict[
         "pending_corrections": db.count_pending_corrections(slug),
         "importing": pipeline.is_importing(slug),
         "pending_summary": db.pending_summary_batch(slug, email),
+        "local_mode": local_mode(request),
     }
 
 
@@ -203,6 +228,8 @@ def setup_form(request: Request) -> Response:
     slug = current_tenant(request)
     if slug is None:
         return _unknown_tenant(request)
+    if local_mode(request):
+        return RedirectResponse("/dashboard", status_code=303)
     if db.count_users(slug) > 0:
         return RedirectResponse("/login", status_code=303)
     return templates.TemplateResponse(
@@ -220,6 +247,8 @@ def setup_submit(
     slug = current_tenant(request)
     if slug is None:
         return _unknown_tenant(request)
+    if local_mode(request):
+        return RedirectResponse("/dashboard", status_code=303)
     if db.count_users(slug) > 0:
         return RedirectResponse("/login", status_code=303)
 
@@ -246,6 +275,8 @@ def login_form(request: Request) -> Response:
     slug = current_tenant(request)
     if slug is None:
         return _unknown_tenant(request)
+    if local_mode(request):
+        return RedirectResponse("/dashboard", status_code=303)
     if db.count_users(slug) == 0:
         return RedirectResponse("/setup", status_code=303)
     return templates.TemplateResponse(
@@ -263,6 +294,8 @@ def login_submit(
     slug = current_tenant(request)
     if slug is None:
         return _unknown_tenant(request)
+    if local_mode(request):
+        return RedirectResponse("/dashboard", status_code=303)
 
     throttle_key = "{}|{}|{}".format(slug, (email or "").strip().lower(), _client_ip(request))
     waiting = auth.locked_seconds(throttle_key)
@@ -326,6 +359,8 @@ def _require_login(request: Request):
     slug = current_tenant(request)
     if slug is None:
         return None, None, _unknown_tenant(request)
+    if local_mode(request):
+        return slug, LOCAL_IDENTITY, None
     if db.count_users(slug) == 0:
         return None, None, RedirectResponse("/setup", status_code=303)
     email = current_user(request, slug)

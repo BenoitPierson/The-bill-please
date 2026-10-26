@@ -321,6 +321,11 @@ Checked by the security suite; breaking one of these is a vulnerability, not a r
 - **Session = tenant + account.** `current_user` refuses a cookie whose tenant is not the
   host's *and* one whose account no longer exists; `/login` clears the session before
   setting it, and `auth` locks an email+IP after `FAILURES_BEFORE_LOCK` failures.
+- **The login step is skipped only for a purely local run** (`app.local_mode`): no
+  `APP_DOMAIN` *and* a loopback `Host` (`127.0.0.1`, `localhost`, `::1`). Requests are then
+  attributed to `LOCAL_IDENTITY` ("Poste local") and `/login` / `/setup` redirect home.
+  Both conditions are required — never widen this to "no APP_DOMAIN" alone, or any
+  computer on the network reaching the port would see every invoice.
 - **Framing is `'self'`, never `'none'`.** The document viewer iframes the original from this
   same origin, and `X-Frame-Options: DENY` / `frame-ancestors 'none'` breaks it — Firefox
   refuses even a same-origin frame. `SAMEORIGIN` / `'self'` still blocks clickjacking from
