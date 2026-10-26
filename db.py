@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     error            TEXT,
     page_count       INTEGER DEFAULT 0,
     uncertain_fields TEXT NOT NULL DEFAULT '[]',
+    uncertain_regions TEXT NOT NULL DEFAULT '[]',
     edited_fields    TEXT NOT NULL DEFAULT '[]',
     content_sha256   TEXT,
     file_size        INTEGER,
@@ -107,10 +108,28 @@ CREATE TABLE IF NOT EXISTS corrections (
     new_value     TEXT,
     user_email    TEXT,
     created_at    TEXT NOT NULL,
-    learned       INTEGER NOT NULL DEFAULT 0
+    learned       INTEGER NOT NULL DEFAULT 0,
+    kind          TEXT NOT NULL DEFAULT 'correction'
 );
 
 CREATE INDEX IF NOT EXISTS idx_corrections_pending ON corrections(learned, supplier_name);
+
+-- Every file of an import that did not become a valid invoice, with why.
+-- Never listed in the app: it only feeds the import summary's error message.
+CREATE TABLE IF NOT EXISTS import_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id     TEXT,
+    archive      TEXT,
+    filename     TEXT NOT NULL,
+    reason       TEXT NOT NULL,
+    message      TEXT,
+    duplicate_of TEXT,
+    invoice_id   TEXT,
+    file_size    INTEGER,
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_log_batch ON import_log(batch_id);
 
 CREATE TABLE IF NOT EXISTS learned_rules (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,13 +171,18 @@ MIGRATIONS = (
     ("batches", "duplicates", "INTEGER NOT NULL DEFAULT 0"),
     ("batches", "started_by", "TEXT"),
     ("batches", "acknowledged_at", "TEXT"),
+    ("invoices", "uncertain_regions", "TEXT NOT NULL DEFAULT '[]'"),
+    ("corrections", "kind", "TEXT NOT NULL DEFAULT 'correction'"),
 )
+
+DUPLICATE_MESSAGE = "Document identique à une facture déjà importée."
+
 
 _initialised = set()
 _init_lock = threading.Lock()
 
 
-def _migrate(conn: sqlite3.Connection, slug: str) -> None:
+def _migrate(conn: sqlite3.Connection, slug: str, had_import_log: bool = True) -> None:
     added = set()
     for table, column, declaration in MIGRATIONS:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info({})".format(table))}
@@ -181,6 +205,20 @@ def _migrate(conn: sqlite3.Connection, slug: str) -> None:
 
     if added_hash:
         _backfill_fingerprints(conn, slug)
+
+    if not had_import_log:
+        # The import log replaces the duplicates table: carry its history over
+        # once, when the log is first created on an existing database.
+        conn.execute(
+            """
+            INSERT INTO import_log (batch_id, archive, filename, reason, message,
+                                    duplicate_of, invoice_id, file_size, created_at)
+            SELECT batch_id, archive, filename, 'DUPLICATE', ?, duplicate_of, NULL,
+                   file_size, created_at
+            FROM duplicates ORDER BY id
+            """,
+            (DUPLICATE_MESSAGE,),
+        )
 
 
 def _backfill_fingerprints(conn: sqlite3.Connection, slug: str) -> None:
@@ -217,11 +255,14 @@ def connect(slug: str) -> Iterator[sqlite3.Connection]:
         key = str(path)
         with _init_lock:
             if fresh_file or key not in _initialised:
+                had_import_log = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'import_log'"
+                ).fetchone() is not None
                 # WAL lets the web request read while import threads write; the
                 # mode is persistent, so setting it once is enough.
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.executescript(SCHEMA)
-                _migrate(connection, slug)
+                _migrate(connection, slug, had_import_log or fresh_file)
                 connection.commit()
                 _initialised.add(key)
         yield connection
@@ -337,12 +378,42 @@ ERROR_KINDS = (
 )
 
 
+IMPORT_REASONS = ("DUPLICATE", "UNSUPPORTED", "EXTRACTION", "QUOTA", "OTHER")
+
+
 def error_kind(message: Optional[str]) -> str:
     text = (message or "").strip()
     for kind, prefixes in ERROR_KINDS:
         if text.startswith(prefixes):
             return kind
     return "other"
+
+
+def reason_for_error(message: Optional[str]) -> str:
+    """Import log reason code for an error message written by the import."""
+    return {"quota": "QUOTA", "unsupported": "UNSUPPORTED", "extraction": "EXTRACTION"}.get(
+        error_kind(message), "OTHER"
+    )
+
+
+def log_import_event(
+    slug: str,
+    batch_id: Optional[str],
+    filename: str,
+    archive: Optional[str],
+    reason: str,
+    message: Optional[str],
+    file_size: Optional[int] = None,
+    duplicate_of: Optional[str] = None,
+    invoice_id: Optional[str] = None,
+) -> None:
+    """Record one file of an import that did not become a valid invoice."""
+    with connect(slug) as conn:
+        conn.execute(
+            "INSERT INTO import_log (batch_id, archive, filename, reason, message, duplicate_of,"
+            " invoice_id, file_size, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (batch_id, archive, filename, reason, message, duplicate_of, invoice_id, file_size, now()),
+        )
 
 
 def batch_summary(slug: str, batch_id: str, examples: int = 8) -> Optional[Dict[str, Any]]:
@@ -367,13 +438,14 @@ def batch_summary(slug: str, batch_id: str, examples: int = 8) -> Optional[Dict[
             (batch_id,),
         ).fetchall()
         duplicate_count = conn.execute(
-            "SELECT COUNT(*) AS n FROM duplicates WHERE batch_id = ?", (batch_id,)
+            "SELECT COUNT(*) AS n FROM import_log WHERE batch_id = ? AND reason = 'DUPLICATE'",
+            (batch_id,),
         ).fetchone()["n"]
         duplicate_rows = conn.execute(
             """
             SELECT d.filename, d.archive, i.filename AS original_filename
-            FROM duplicates d LEFT JOIN invoices i ON i.id = d.duplicate_of
-            WHERE d.batch_id = ? ORDER BY d.filename LIMIT ?
+            FROM import_log d LEFT JOIN invoices i ON i.id = d.duplicate_of
+            WHERE d.batch_id = ? AND d.reason = 'DUPLICATE' ORDER BY d.filename LIMIT ?
             """,
             (batch_id, examples),
         ).fetchall()
@@ -502,41 +574,11 @@ def insert_lines(slug: str, invoice_id: str, lines: List[Dict[str, Any]]) -> int
     return len(lines)
 
 
-def record_duplicate(
-    slug: str,
-    batch_id: str,
-    filename: str,
-    archive: Optional[str],
-    duplicate_of: str,
-    file_size: int,
-) -> None:
-    with connect(slug) as conn:
-        conn.execute(
-            "INSERT INTO duplicates (batch_id, archive, filename, duplicate_of, file_size, created_at)"
-            " VALUES (?,?,?,?,?,?)",
-            (batch_id, archive, filename, duplicate_of, file_size, now()),
-        )
-
-
-def list_duplicates(slug: str, limit: int = 50) -> List[sqlite3.Row]:
-    with connect(slug) as conn:
-        return conn.execute(
-            """
-            SELECT d.filename, d.archive, d.file_size, d.created_at, d.duplicate_of,
-                   i.filename AS original_filename, i.archive AS original_archive,
-                   i.stored_name AS original_stored_name
-            FROM duplicates d LEFT JOIN invoices i ON i.id = d.duplicate_of
-            ORDER BY d.created_at DESC, d.id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-
-
 def duplicate_summary(slug: str) -> Dict[str, int]:
     with connect(slug) as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS n, IFNULL(SUM(file_size), 0) AS bytes FROM duplicates"
+            "SELECT COUNT(*) AS n, IFNULL(SUM(file_size), 0) AS bytes FROM import_log"
+            " WHERE reason = 'DUPLICATE'"
         ).fetchone()
     return {"count": row["n"], "bytes": row["bytes"]}
 

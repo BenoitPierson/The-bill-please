@@ -448,8 +448,6 @@ def invoices(request: Request) -> Response:
             "rules": [dict(r) for r in db.list_rules(slug)],
             "batches": _running_batches(slug),
             "storage": _storage_view(slug),
-            "duplicates": [dict(d) for d in db.list_duplicates(slug)],
-            "duplicate_summary": db.duplicate_summary(slug),
         }
     )
     return templates.TemplateResponse("invoices.html", context)

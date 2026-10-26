@@ -202,8 +202,11 @@ def _remove_original(slug: str, stored_name: Optional[str]) -> int:
         return 0
 
 
-def _record_failure(slug: str, batch_id: str, source: InvoiceSource, message: str) -> str:
-    db.insert_invoice(
+def _record_failure(
+    slug: str, batch_id: str, source: InvoiceSource, message: str, file_size: Optional[int] = None
+) -> str:
+    """An error row (visible under "En erreur", retryable) plus its import log line."""
+    invoice_id = db.insert_invoice(
         slug,
         {
             "id": uuid.uuid4().hex,
@@ -212,6 +215,10 @@ def _record_failure(slug: str, batch_id: str, source: InvoiceSource, message: st
             "filename": source.filename,
             "error": message,
         },
+    )
+    db.log_import_event(
+        slug, batch_id, source.filename, source.archive, db.reason_for_error(message), message,
+        file_size=file_size, invoice_id=invoice_id,
     )
     return FAILED
 
@@ -254,7 +261,10 @@ def _process_one(
                     duplicate_of = existing["id"]
 
         if duplicate_of is not None:
-            db.record_duplicate(slug, batch_id, source.filename, source.archive, duplicate_of, size)
+            db.log_import_event(
+                slug, batch_id, source.filename, source.archive, "DUPLICATE", db.DUPLICATE_MESSAGE,
+                file_size=size, duplicate_of=duplicate_of,
+            )
             return DUPLICATE
 
         if state.quota_bytes and state.used_bytes + size > state.quota_bytes:
@@ -264,6 +274,7 @@ def _process_one(
                 source,
                 "Quota de stockage atteint : facture non importee "
                 "(contacter l'administrateur pour l'augmenter).",
+                file_size=size,
             )
 
         state.claimed[fingerprint] = invoice_id
@@ -309,6 +320,11 @@ def _process_one(
             "file_size": size,
         },
     )
+    if result.error is not None:
+        db.log_import_event(
+            slug, batch_id, source.filename, source.archive, db.reason_for_error(result.error),
+            result.error, file_size=size, invoice_id=invoice_id,
+        )
     # Product lines feed the Products tab; an invoice without an itemised table
     # simply has none.
     if result.lines:

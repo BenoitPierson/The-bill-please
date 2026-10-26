@@ -125,54 +125,6 @@
   <span id="learnStatus" class="muted"></span>
 </details>
 
-<!-- Duplicates ------------------------------------------------------------->
-{% if duplicate_summary.count %}
-<details class="card rules-card" id="doublons">
-  <summary>
-    Doublons ignores a l'import
-    <span class="badge">{{ duplicate_summary.count }}</span>
-    <span class="badge">{{ duplicate_summary.bytes | filesize }} evites</span>
-  </summary>
-  <p class="hint">
-    Ces documents etaient identiques, au bit pres, a une facture deja importee : ils n'ont
-    ete ni stockes, ni envoyes a l'extraction, ni comptes dans les totaux.
-  </p>
-  <table class="dup-table">
-    <thead>
-      <tr><th>Document ignore</th><th>Identique a</th><th>Taille</th><th>Date</th></tr>
-    </thead>
-    <tbody>
-      {% for dup in duplicates %}
-      <tr>
-        <td>
-          {{ dup.filename.split('/')[-1] }}
-          {% if dup.archive %}<div class="muted small">{{ dup.archive }}</div>{% endif %}
-        </td>
-        <td>
-          {% if dup.original_filename %}
-            {% if dup.original_stored_name %}
-            <button class="link-btn view-doc" data-id="{{ dup.duplicate_of }}"
-                    data-name="{{ dup.original_filename }}">{{ dup.original_filename.split('/')[-1] }}</button>
-            {% else %}
-            {{ dup.original_filename.split('/')[-1] }}
-            {% endif %}
-            {% if dup.original_archive %}<div class="muted small">{{ dup.original_archive }}</div>{% endif %}
-          {% else %}
-            <span class="muted">facture depuis supprimee</span>
-          {% endif %}
-        </td>
-        <td>{{ dup.file_size | filesize }}</td>
-        <td class="muted small">{{ dup.created_at[:10] }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% if duplicate_summary.count > duplicates | length %}
-  <p class="hint">{{ duplicates | length }} plus recents affiches sur {{ duplicate_summary.count }}.</p>
-  {% endif %}
-</details>
-{% endif %}
-
 <!-- Table ------------------------------------------------------------------->
 <div class="card table-card">
   <table class="data-table" id="invoiceTable">
