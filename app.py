@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
+from fastapi.concurrency import run_in_threadpool
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import (
     FileResponse,
@@ -745,7 +746,8 @@ async def api_edit_invoice(request: Request, invoice_id: str) -> Response:
     )
     logger.info("[%s] correction par %s : %s de la facture %s", slug, email, field, invoice_id)
 
-    pending, learned = _after_review(slug)
+    # The learning run is a blocking Claude call: keep it off the event loop.
+    pending, learned = await run_in_threadpool(_after_review, slug)
     return JSONResponse(
         {"status": "ok", "value": value, "pending_corrections": pending, "learned": learned}
     )
@@ -783,7 +785,8 @@ async def api_confirm_field(request: Request, invoice_id: str) -> Response:
     field = payload.get("field") if isinstance(payload, dict) else None
     if not isinstance(field, str):
         return JSONResponse({"error": "Champ manquant."}, status_code=400)
-    return _review_response(slug, invoice_id, [field], email)
+    # May trigger a learning run, a blocking Claude call: keep it off the loop.
+    return await run_in_threadpool(_review_response, slug, invoice_id, [field], email)
 
 
 @app.post("/api/invoices/{invoice_id}/validate")

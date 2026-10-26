@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 import fitz  # PyMuPDF
-from PIL import Image
+from PIL import Image, ImageOps
 from anthropic import Anthropic
 
 MODEL = "claude-sonnet-5"
@@ -435,13 +435,19 @@ def expand_upload(
 
 def _resize_if_needed(image_bytes: bytes, fmt: str) -> bytes:
     with Image.open(io.BytesIO(image_bytes)) as img:
+        # A phone photo stores its rotation in EXIF and the browser applies it.
+        # Re-encoding drops the tag, so rotate the pixels first: the model must
+        # see the frame the viewer shows, or its doubt boxes land elsewhere.
+        rotated = img.getexif().get(0x0112, 1) not in (1, None)
         long_edge = max(img.size)
-        if long_edge <= MAX_IMAGE_LONG_EDGE:
+        if long_edge <= MAX_IMAGE_LONG_EDGE and not rotated:
             return image_bytes
-        scale = MAX_IMAGE_LONG_EDGE / long_edge
-        new_size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
-        resized = img.convert("RGB") if img.mode not in ("RGB", "L") else img
-        resized = resized.resize(new_size, Image.LANCZOS)
+        upright = ImageOps.exif_transpose(img) if rotated else img
+        resized = upright.convert("RGB") if upright.mode not in ("RGB", "L") else upright
+        if long_edge > MAX_IMAGE_LONG_EDGE:
+            scale = MAX_IMAGE_LONG_EDGE / long_edge
+            new_size = (max(1, int(resized.width * scale)), max(1, int(resized.height * scale)))
+            resized = resized.resize(new_size, Image.LANCZOS)
         buf = io.BytesIO()
         resized.save(buf, format=fmt)
         return buf.getvalue()

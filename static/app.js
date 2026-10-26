@@ -630,6 +630,7 @@
           input.dataset.original = value;
         }
         input.dataset.invoice = data.id;
+        input.readOnly = false;
         const doubtful = data.uncertain_fields.includes(field);
         holder.classList.toggle("is-uncertain", doubtful);
         holder.classList.toggle("is-edited", data.edited_fields.includes(field));
@@ -654,6 +655,9 @@
       if (opts.focusRow) row.focus({ preventScroll: true });
       if (opts.open) detailPane.classList.add("is-open");
 
+      // Until the new invoice arrives the fields still show the previous one:
+      // lock them so nothing typed now can be saved under the wrong id.
+      inputs.forEach((input) => { input.readOnly = true; });
       const token = ++loadToken;
       try {
         const response = await fetch(`/api/invoices/${encodeURIComponent(currentId)}`);
@@ -663,7 +667,10 @@
         renderDetail(data);
         detailPane.dispatchEvent(new CustomEvent("invoice:selected", { detail: { id: data.id, data } }));
       } catch (error) {
-        if (token === loadToken) announce(error.message);
+        if (token === loadToken) {
+          inputs.forEach((input) => { input.readOnly = !current; });
+          announce(error.message);
+        }
       }
     }
 
@@ -697,17 +704,18 @@
 
     inputs.forEach((input) => {
       const holder = input.closest(".detail-field");
-      // The id is captured when editing starts, so a save still pending while
-      // the user moves to another invoice lands on the one it was typed into.
+      // The id is captured when editing starts, from the invoice the field is
+      // showing (not the one being loaded), so a save lands on the invoice
+      // whose value was typed over.
       let savingId = null;
       input.addEventListener("focus", () => {
-        savingId = currentId;
+        savingId = input.dataset.invoice || null;
         detailPane.dispatchEvent(new CustomEvent("region:focus", { detail: { field: input.dataset.field } }));
       });
       input.addEventListener("mouseenter", () => {
         detailPane.dispatchEvent(new CustomEvent("region:focus", { detail: { field: input.dataset.field } }));
       });
-      bindEditing(input, () => savingId || currentId, holder, (value, invoiceId) => {
+      bindEditing(input, () => savingId || input.dataset.invoice, holder, (value, invoiceId) => {
         if (!current || invoiceId !== current.id) return;
         const field = input.dataset.field;
         current[field] = value;
@@ -1039,6 +1047,14 @@
       pointers.delete(event.pointerId);
       if (pointers.size < 2) pinch = null;
       if (pointers.size === 0) {
+        // The stage captures the pointer, so the click never reaches the box
+        // under it: a tap (no real movement) is hit-tested here instead.
+        if (drag && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 4) {
+          const hit = document.elementFromPoint(event.clientX, event.clientY);
+          const box = hit && hit.closest(".region");
+          const input = box && $(`#field-${box.dataset.field}`);
+          if (input) input.focus();
+        }
         drag = null;
         viewerStage.classList.remove("is-dragging");
         animateTo(settled(view.z)); // spring back inside the edges

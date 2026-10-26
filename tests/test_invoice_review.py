@@ -78,3 +78,38 @@ def test_correcting_a_field_removes_its_region(client, tenant):
     iid = add(tenant, invoice_date="2026-01-02", uncertain_fields=["invoice_date"], uncertain_regions=[box])
     client.patch(f"/api/invoices/{iid}", json={"field": "invoice_date", "value": "2026-02-01"})
     assert json.loads(db.get_invoice(tenant, iid)["uncertain_regions"]) == []
+
+
+def _learning_runs_off_the_event_loop(monkeypatch):
+    """The rule distillation is a multi-second Claude call: run on the event
+    loop it would freeze every tenant's requests, import polling included."""
+    import asyncio
+
+    seen = []
+
+    def refresh(client, slug):
+        try:
+            asyncio.get_running_loop()
+            seen.append("event loop")
+        except RuntimeError:
+            seen.append("worker thread")
+        return {"corrections": 3, "rules_updated": 0}
+
+    monkeypatch.setattr(app_module, "AUTO_LEARN_THRESHOLD", 1)
+    monkeypatch.setattr(app_module, "get_client", lambda: None)
+    monkeypatch.setattr(learning, "refresh_rules", refresh)
+    return seen
+
+
+def test_confirm_learns_off_the_event_loop(client, tenant, monkeypatch):
+    seen = _learning_runs_off_the_event_loop(monkeypatch)
+    iid = add(tenant, invoice_number="A1", uncertain_fields=["invoice_number"])
+    client.post(f"/api/invoices/{iid}/confirm", json={"field": "invoice_number"})
+    assert seen == ["worker thread"]
+
+
+def test_correction_learns_off_the_event_loop(client, tenant, monkeypatch):
+    seen = _learning_runs_off_the_event_loop(monkeypatch)
+    iid = add(tenant, invoice_number="A1")
+    client.patch(f"/api/invoices/{iid}", json={"field": "invoice_number", "value": "B2"})
+    assert seen == ["worker thread"]
