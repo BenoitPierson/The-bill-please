@@ -493,8 +493,8 @@ def insert_invoice(slug: str, record: Dict[str, Any]) -> str:
                 id, batch_id, archive, filename, stored_name, content_type,
                 supplier_name, invoice_number, invoice_date, total_amount, currency,
                 vat_amount, extraction_notes, error, page_count, uncertain_fields,
-                edited_fields, content_sha256, file_size, created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                uncertain_regions, edited_fields, content_sha256, file_size, created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 invoice_id,
@@ -513,6 +513,7 @@ def insert_invoice(slug: str, record: Dict[str, Any]) -> str:
                 record.get("error"),
                 record.get("page_count") or 0,
                 json.dumps(record.get("uncertain_fields") or [], ensure_ascii=False),
+                json.dumps(record.get("uncertain_regions") or [], ensure_ascii=False),
                 "[]",
                 record.get("content_sha256"),
                 record.get("file_size"),

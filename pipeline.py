@@ -316,6 +316,7 @@ def _process_one(
             "error": result.error,
             "page_count": result.page_count,
             "uncertain_fields": result.uncertain_fields,
+            "uncertain_regions": result.uncertain_regions,
             "content_sha256": fingerprint,
             "file_size": size,
         },
