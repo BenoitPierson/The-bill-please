@@ -342,3 +342,70 @@ contractualiser.
 - **Tests de sécurité absents du dépôt.** `CLAUDE.md` et la note de septembre citent une suite de
   tests de sécurité qui n'est pas dans le dépôt. Les exigences `ENF-SEC` sans test sont marquées
   « non couverte » en section 8.
+
+## 7. Coût par facture et capacité restante
+
+L'application consomme le **crédit API** du compte Anthropic auquel appartient la clé du `.env`.
+C'est un crédit prépayé en dollars, distinct de tout abonnement Claude (Pro, Max). Le crédit
+restant se lit sur la Console Anthropic, page de facturation.
+
+### 7.1 Estimation
+
+Le coût ci-dessous est **calculé, pas mesuré** : aucune clé API n'a été utilisée pour rédiger ce
+document. Il combine les volumes de jetons mesurés en septembre avec le tarif public du modèle.
+
+**Tarif de `claude-sonnet-5`**, relevé le 27 octobre 2026 sur
+[la page de tarifs d'Anthropic](https://platform.claude.com/docs/en/about-claude/pricing), en
+dollars par million de jetons :
+
+| Entrée | Sortie | Écriture du cache (5 min) | Lecture du cache |
+|---|---|---|---|
+| 2 $ | 10 $ | 2,50 $ | 0,20 $ |
+
+**Volumes retenus :**
+
+- **images :** environ 2 900 jetons par page (mesure de septembre, rendu à 150 dpi, inchangé) ;
+- **consignes système :** 1 270 jetons sans règle, environ 1 850 avec 5 règles, environ 6 900
+  avec 60 règles. Elles sont relues depuis le cache à partir de la deuxième facture d'un import ;
+- **réponse :** dépend surtout du nombre de lignes de facture. La mesure documentée dans
+  `CLAUDE.md` est d'un demi-centime à un centime de sortie par facture, soit 500 à 1 000 jetons.
+
+| Cas | Hypothèses | Coût par facture |
+|---|---|---|
+| Bas | 1 page, aucune règle, réponse de 600 jetons | **0,012 $** |
+| Typique | 1 page, 5 règles, réponse de 1 000 jetons | **0,016 $** |
+| Haut | 3 pages, 60 règles, facture de 40 lignes (réponse de 3 000 jetons) | **0,049 $** |
+
+La réponse représente environ 60 % du coût dans les cas typique et haut. Le cas haut dépasse volontairement la fourchette mesurée : c'est une facture longue,
+pas une facture courante.
+
+La première facture d'un import paie l'écriture du cache au lieu de sa lecture : de 0,3 à
+1,6 centime de plus, une seule fois par import. Les appels d'apprentissage (un par fournisseur
+corrigé, sans image, réponse de 400 jetons au plus) coûtent une fraction de centime chacun et sont
+rares à côté des extractions.
+
+**Comparaison avec septembre.** La note de septembre estimait « 10 à 12 € pour 1 000 factures »,
+soit 1 à 1,2 centime d'euro par facture. C'était avant l'extraction des lignes de facture, qui
+a allongé les réponses. Le cas typique d'aujourd'hui, environ 16 $ pour 1 000 factures, est cohérent
+avec cette évolution.
+
+### 7.2 Capacité restante
+
+```
+factures restantes ≈ crédit restant ÷ coût par facture
+```
+
+| Crédit restant | Cas bas | Cas typique | Cas haut |
+|---|---|---|---|
+| 10 $ | ~820 | ~610 | ~200 |
+| 50 $ | ~4 110 | ~3 070 | ~1 020 |
+| 100 $ | ~8 230 | ~6 150 | ~2 040 |
+
+Les doublons ne coûtent rien : ils sont écartés avant l'appel à l'API (`EF-IMP-6`). Un lot de
+1 181 factures comme le jeu de référence coûte donc environ 19 $ dans le cas typique.
+
+### 7.3 Mesure réelle
+
+L'application ne relève pas encore les jetons réellement consommés : la réponse de l'API les
+indique pourtant à chaque appel. Une fonctionnalité dédiée est prévue, avec sa propre conception.
+Elle relèvera ces jetons, affichera un coût moyen mesuré et remplacera cette estimation.
