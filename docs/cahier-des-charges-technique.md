@@ -22,7 +22,7 @@ changé depuis :
 
 | Sujet | Septembre 2026 (PDF) | Aujourd'hui |
 |---|---|---|
-| Doublons | table `duplicates`, panneau « Doublons ignorés » sur la page Invoices | journal `import_log` en base avec un code raison ; aucun panneau, seul le bilan d'import les signale |
+| Doublons | table `duplicates`, panneau « Doublons ignorés » sur la page Invoices | journal `import_log` en base avec un code raison ; aucun panneau ni liste ; les doublons sont comptés dans le bilan d'import, la carte « Dernier import » de l'accueil et `manage.py storage` |
 | Réponse de l'automate | `max_tokens` 2 048 | 8 192 (les lignes de facture d'une facture de 40 lignes tronquaient la réponse) |
 | Contenu extrait | champs d'en-tête, champs douteux, remarques | en plus : lignes de facture, zone de chaque champ douteux sur la page |
 | Vérification | tableau éditable, visionneuse du document en fenêtre | liste / détail, visionneuse zoomable qui entoure les zones douteuses, confirmation et validation |
@@ -74,8 +74,9 @@ Chaque exigence est numérotée `EF-<domaine>-<n>`. La section 8 indique le test
 - **EF-EXT-2** — L'application doit rendre les dates au format `AAAA-MM-JJ`, les devises en code ISO 4217 et les montants en nombres.
 - **EF-EXT-3** — L'application doit extraire les lignes de facture : libellé tel qu'imprimé, nom générique du produit, catégorie, quantité, unité normalisée, prix unitaire et total de ligne.
 - **EF-EXT-4** — L'application doit marquer comme douteux chaque champ dont l'automate n'est pas sûr, et doit conserver une remarque lisible qui explique le doute.
-- **EF-EXT-5** — L'application doit conserver, pour chaque champ douteux, la zone de la page où il se trouve, et doit écarter toute zone invalide (page inexistante, surface nulle, champ non douteux) ou débordant de la page.
-- **EF-EXT-6** — L'application doit envoyer toutes les pages d'un document (5 au plus) en un seul appel, pour que l'en-tête et le récapitulatif final soient lus ensemble.
+- **EF-EXT-5** — L'application doit conserver, pour chaque champ douteux, la zone de la page où il se trouve, doit écarter toute zone invalide (page inexistante, surface nulle, champ non douteux), et doit ramener dans la page une zone qui en déborde.
+- **EF-EXT-6** — L'application doit envoyer les 5 premières pages d'un document en un seul appel, pour que l'en-tête et le récapitulatif final soient lus ensemble.
+  - Les pages suivantes sont ignorées sans remarque : un total imprimé en page 6 ou au-delà n'est pas lu.
 - **EF-EXT-7** — L'application doit redresser une photo selon son orientation EXIF avant de l'envoyer, pour que les zones douteuses correspondent à l'image affichée.
 - **EF-EXT-8** — L'application doit transformer un échec d'extraction (API indisponible, réponse vide ou invalide) en ligne en erreur, visible dans l'onglet « En erreur », plutôt que de perdre le document.
 - **EF-EXT-9** — L'application doit appliquer, lors de chaque extraction, toutes les règles apprises de l'espace.
@@ -137,11 +138,15 @@ Chaque exigence est numérotée `EF-<domaine>-<n>`. La section 8 indique le test
       l'automate ;
     - 1,58 s par facture en lot, soit environ 31 min pour les 1 181 factures du jeu de
       référence.
+  - Ces temps datent d'avant l'extraction des lignes de facture (27 septembre), qui a
+    allongé les réponses de l'automate (section 7.1). Ils sont à remesurer ; l'estimation du
+    temps restant (`ESTIMATED_SECONDS_PER_INVOICE` = 10 s) repose encore sur eux.
 - **ENF-PERF-2** — L'application doit refaire jusqu'à 6 tentatives d'un appel en cas de surcharge de l'API (erreurs 429 et 529) avant de déclarer l'extraction en échec.
 - **ENF-PERF-3** — L'application doit placer les consignes système, règles apprises comprises, en cache d'API : elles sont identiques pour toutes les factures d'un import.
   - Mesure de septembre : environ 7 $ économisés sur un lot de 1 181 factures.
 - **ENF-PERF-4** — L'application doit limiter le nombre de règles injectées à 60 (`MAX_RULES_IN_PROMPT`), et doit réduire les images à 2 000 pixels sur le grand côté.
-- **ENF-PERF-5** — L'application ne doit pas lire une archive en entier en mémoire décompressée : chaque document est lu au moment où un traitement le prend en charge.
+- **ENF-PERF-5** — L'application ne doit pas décompresser en mémoire les documents d'une archive avant qu'un traitement les prenne en charge : chaque document est lu à ce moment-là.
+  - Exception : une archive imbriquée dans une autre est lue entière en mémoire au dépliage, et l'archive envoyée est conservée entière, compressée, pendant l'import.
 - **ENF-PERF-6** — L'apprentissage des règles, qui est un appel bloquant de plusieurs secondes, doit s'exécuter hors de la boucle d'événements du serveur, pour ne pas figer les autres requêtes.
 
 ### 4.2 Stockage et quota (`STO`)
@@ -379,8 +384,9 @@ dollars par million de jetons :
 La réponse représente environ 60 % du coût dans les cas typique et haut. Le cas haut dépasse volontairement la fourchette mesurée : c'est une facture longue,
 pas une facture courante.
 
-La première facture d'un import paie l'écriture du cache au lieu de sa lecture : de 0,3 à
-1,6 centime de plus, une seule fois par import. Les appels d'apprentissage (un par fournisseur
+Les premiers appels d'un import paient l'écriture du cache au lieu de sa lecture : de 0,3 à
+1,6 centime de plus chacun. Avec 8 traitements en parallèle, jusqu'à 8 appels de la première
+série le paient, soit au plus une dizaine de centimes par import. Les appels d'apprentissage (un par fournisseur
 corrigé, sans image, réponse de 400 jetons au plus) coûtent une fraction de centime chacun et sont
 rares à côté des extractions.
 
@@ -412,7 +418,7 @@ Elle relèvera ces jetons, affichera un coût moyen mesuré et remplacera cette 
 
 ## 8. Traçabilité
 
-Sur 82 exigences, **30** sont vérifiées par au moins un test du dépôt, dont 15 entièrement ; **52** ne le sont pas.
+Sur 82 exigences, **30** sont vérifiées par au moins un test du dépôt, dont 14 entièrement ; **52** ne le sont pas.
 Les tests cités sont ceux de la branche de la PR #4 (75 tests, `pytest -q`).
 
 Trois remarques pour lire ce tableau :
@@ -431,7 +437,7 @@ Trois remarques pour lire ce tableau :
 | EF-IMP-6 | `tests/test_import_log.py::test_duplicate_in_same_archive_is_logged` (partielle : copie d'un import précédent et exclusion des totaux non testées) |
 | EF-IMP-7 | **non couverte** |
 | EF-IMP-8 | `tests/test_import_log.py::test_reason_for_error`, `tests/test_import_log.py::test_duplicate_in_same_archive_is_logged`, `tests/test_import_log.py::test_unsupported_file_is_logged_and_kept_as_error_row`, `tests/test_import_log.py::test_failed_extraction_is_logged` |
-| EF-IMP-9 | `tests/test_import_log.py::test_batch_summary_counts_duplicates_from_log` (partielle : la reproposition du bilan n'est pas testée) |
+| EF-IMP-9 | `tests/test_import_log.py::test_batch_summary_counts_duplicates_from_log` (partielle : seuls les doublons du bilan sont testés ; intégrées, erreurs par type, non traitées et reproposition ne le sont pas) |
 | EF-IMP-10 | **non couverte** |
 | EF-IMP-11 | `tests/test_pages_route.py::test_pdf_page_is_rendered_as_png` (partielle : la route `/file` n'est pas testée) |
 | EF-EXT-1 | **non couverte** (comportement de l'automate) |
@@ -450,7 +456,7 @@ Trois remarques pour lire ce tableau :
 | EF-ACC-5 | `tests/test_home_route.py::test_home_lists_three_latest_imports`, `tests/test_dashboard.py::test_top_price_alerts_keeps_three_highest_drifts`, `tests/test_db_home.py::test_latest_batch_none_then_most_recent`, `tests/test_home_route.py::test_running_import_shows_time_remaining` |
 | EF-ACC-6 | `tests/test_home_route.py::test_home_has_no_filters_and_no_scale_toggle` |
 | EF-FAC-1 | `tests/test_invoice_list.py::test_page_lists_rows_with_state_and_has_detail_pane` (partielle : la sélection dans l'adresse est du JavaScript, non testé) |
-| EF-FAC-2 | `tests/test_invoice_list.py::test_sort_orders_put_missing_values_last`, `tests/test_invoice_list.py::test_status_counts_ignore_the_status_filter`, `tests/test_invoice_list.py::test_status_links_keep_other_filters` |
+| EF-FAC-2 | `tests/test_invoice_list.py::test_sort_orders_put_missing_values_last`, `tests/test_invoice_list.py::test_status_counts_ignore_the_status_filter`, `tests/test_invoice_list.py::test_status_links_keep_other_filters` (partielle : le tri, les compteurs et les liens sont testés, pas les filtres eux-mêmes) |
 | EF-FAC-3 | `tests/test_invoice_list.py::test_invoices_page_has_no_duplicates_panel_and_keeps_sort_in_pagination` |
 | EF-FAC-4 | `tests/test_pages_route.py::test_pdf_page_is_rendered_as_png`, `tests/test_pages_route.py::test_page_out_of_range_is_404`, `tests/test_pages_route.py::test_api_detail_reports_pages_and_regions` (partielle : zoom et déplacement sont du JavaScript, non testé) |
 | EF-FAC-5 | **non couverte** (JavaScript) |
@@ -493,7 +499,7 @@ Trois remarques pour lire ce tableau :
 | ENF-SEC-9 | **non couverte** |
 | ENF-SEC-10 | **non couverte** |
 | ENF-SEC-11 | `tests/test_pages_route.py::test_pdf_page_is_rendered_as_png` (partielle : images de pages seulement) |
-| ENF-SEC-12 | `tests/test_invoice_review.py::test_confirm_rejects_a_field_that_is_not_doubtful` (partielle : la confirmation seulement, pas la correction) |
+| ENF-SEC-12 | `tests/test_invoice_review.py::test_confirm_rejects_a_field_that_is_not_doubtful` (partielle : ce test passerait même sans le contrôle `EDITABLE_FIELDS`, car le champ refusé n'est pas douteux ; la route de correction n'est pas testée) |
 | ENF-ISO-1 | **non couverte** |
 | ENF-ISO-2 | **non couverte** |
 | ENF-ISO-3 | `tests/test_migrations.py::test_old_database_gets_new_columns_and_log`, `tests/test_migrations.py::test_duplicates_are_copied_only_once` |
