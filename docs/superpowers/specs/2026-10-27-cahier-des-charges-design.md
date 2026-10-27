@@ -180,3 +180,22 @@ depuis :
 
 La PR de ces documents décrit le code de la PR #4. Elle doit être fusionnée **après** la PR #4 ;
 sa description le précise.
+
+## Révision du 27 octobre — une spec par fonctionnalité
+
+Demande d'Océane après la première version : séparer les exigences fonctionnelles et non
+fonctionnelles, et faire une spec par fonctionnalité. Le livrable 1 devient le dossier
+`docs/cahier-des-charges/` :
+
+- `README.md` : sommaire, périmètre, acteurs, changements depuis septembre, lecture des tests ;
+- `fonctionnel/` : `01-importation` (l'extraction y est rattachée), `02-exportation`, `03-accueil`,
+  `04-produits` (avec ses filtres), `05-tableau-factures`, `06-verification` (l'apprentissage des
+  règles y est rattaché), `07-administration` ;
+- `non-fonctionnel.md` : identifiants `ENF-…` inchangés ;
+- `architecture.md` : modules, parcours, données, API, coût par facture, limites techniques.
+
+Chaque spec fonctionnelle suit le plan objectif, parcours avec captures, exigences avec leur
+test, règles de gestion, limites. Les exigences sont renumérotées par fonctionnalité
+(`EF-IMP`, `EF-EXP`, `EF-ACC`, `EF-PRO`, `EF-FAC`, `EF-VER`, `EF-ADM`) ; trois exigences
+nouvelles décrivent ce qui n'était pas isolé (contenu et plafond de l'export, filtres de la
+page Produits). Chaque fichier existe aussi en document éditable, hors dépôt.
