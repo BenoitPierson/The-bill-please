@@ -75,21 +75,34 @@ Fichier Markdown versionné, relu en PR. Plan validé :
 
 ## Livrable 2 — document Claude « The Bill Please — présentation »
 
-Document partageable (type Docs), exportable en PDF ou Word. Ton : clair, sans jargon. Le modèle
+Document **éditable** de type Docs : Océane, et les personnes avec qui elle le partage, le
+modifient directement dans le document, sans passer par moi. Il s'exporte en Word ou en PDF
+pour l'envoyer. Ton : clair, sans jargon. Le modèle
 est appelé « l'automate », comme dans l'application ; Anthropic n'est nommé qu'en section 6
 (données envoyées à l'API) et Claude qu'en section 8. Plan validé :
 
 1. **Le problème.**
 2. **La solution en une phrase**, puis le parcours en 4 étapes : importer → l'automate lit →
    on vérifie seulement le douteux → on analyse.
-3. **Les écrans.** Captures commentées des images déjà commitées :
-   - `2026-10-25-accueil-brume-ordinateur.png` (accueil) ;
-   - `2026-10-26-factures-liste-detail.png` (liste et détail) ;
-   - `2026-10-26-factures-zone-douteuse.png` (zone douteuse) ;
-   - `2026-10-26-factures-bilan-import.png` (bilan d'import) ;
-   - `2026-10-26-factures-telephone.png` (téléphone).
+3. **Le parcours en images.** Chaque grande étape a sa capture d'écran commentée :
 
-   Elles montrent des données de test : une mention le précise.
+   | Étape | Capture | Statut |
+   |---|---|---|
+   | Importer | panneau d'import ouvert, zone de dépôt et espace occupé | à prendre |
+   | L'automate lit | import en cours : progression et temps restant | à prendre |
+   | L'automate lit | bilan de fin d'import (`2026-10-26-factures-bilan-import.png`) | existante |
+   | Vérifier | liste et détail (`2026-10-26-factures-liste-detail.png`) | existante |
+   | Vérifier | zone douteuse entourée sur le document (`2026-10-26-factures-zone-douteuse.png`) | existante |
+   | Analyser | accueil (`2026-10-25-accueil-brume-ordinateur.png`) | existante |
+   | Analyser | page Produits, dérive des prix (version actuelle, pas encore refaite) | à prendre |
+
+   La vue téléphone (`2026-10-26-factures-telephone.png`) suit, en encadré.
+
+   Toutes les captures montrent des données de test, et une mention le précise. Les captures
+   « à prendre » le sont sur le code de la PR #4, avec un serveur local et des données de
+   test. Pour l'import en cours, l'extraction est simulée : aucun appel à l'API, puisqu'aucune
+   clé n'est disponible ici. Le script de simulation reste hors du dépôt. Les nouvelles
+   captures sont commitées dans `docs/superpowers/specs/images/`, à côté des autres.
 4. **Ce qui la distingue.**
    - elle signale ses doutes et les montre sur le document ;
    - elle apprend des corrections, fournisseur par fournisseur ;
