@@ -409,3 +409,99 @@ Les doublons ne coûtent rien : ils sont écartés avant l'appel à l'API (`EF-I
 L'application ne relève pas encore les jetons réellement consommés : la réponse de l'API les
 indique pourtant à chaque appel. Une fonctionnalité dédiée est prévue, avec sa propre conception.
 Elle relèvera ces jetons, affichera un coût moyen mesuré et remplacera cette estimation.
+
+## 8. Traçabilité
+
+Sur 82 exigences, **30** sont vérifiées par au moins un test du dépôt, dont 15 entièrement ; **52** ne le sont pas.
+Les tests cités sont ceux de la branche de la PR #4 (75 tests, `pytest -q`).
+
+Trois remarques pour lire ce tableau :
+
+- **Sécurité.** `CLAUDE.md` et la note de septembre citent une suite de tests de sécurité (cloisonnement entre clients, sessions, service des fichiers, imports). Elle n'est pas dans le dépôt : les exigences `ENF-SEC` qu'elle couvrait sont marquées non couvertes, ce qui veut dire *non vérifiées par un test présent*, pas *non respectées*.
+- **Navigateur.** Le comportement de la page Factures (sélection, visionneuse, zones, téléphone) a été vérifié par des contrôles Playwright pendant la PR #4. Ces scripts ne sont pas dans le dépôt, donc ils ne comptent pas ici.
+- **Automate.** Ce que l'automate lit sur un document (`EF-EXT-1` à `EF-EXT-4`) dépend du modèle et des consignes ; aucun test du dépôt ne le vérifie sans appel réel à l'API.
+
+| Exigence | Test(s) |
+|---|---|
+| EF-IMP-1 | **non couverte** |
+| EF-IMP-2 | `tests/test_import_log.py::test_unsupported_file_is_logged_and_kept_as_error_row` (partielle : fichiers système non testés) |
+| EF-IMP-3 | **non couverte** |
+| EF-IMP-4 | `tests/test_home_route.py::test_running_import_shows_time_remaining` (partielle : affichage seulement, pas le calcul) |
+| EF-IMP-5 | **non couverte** |
+| EF-IMP-6 | `tests/test_import_log.py::test_duplicate_in_same_archive_is_logged` (partielle : copie d'un import précédent et exclusion des totaux non testées) |
+| EF-IMP-7 | **non couverte** |
+| EF-IMP-8 | `tests/test_import_log.py::test_reason_for_error`, `tests/test_import_log.py::test_duplicate_in_same_archive_is_logged`, `tests/test_import_log.py::test_unsupported_file_is_logged_and_kept_as_error_row`, `tests/test_import_log.py::test_failed_extraction_is_logged` |
+| EF-IMP-9 | `tests/test_import_log.py::test_batch_summary_counts_duplicates_from_log` (partielle : la reproposition du bilan n'est pas testée) |
+| EF-IMP-10 | **non couverte** |
+| EF-IMP-11 | `tests/test_pages_route.py::test_pdf_page_is_rendered_as_png` (partielle : la route `/file` n'est pas testée) |
+| EF-EXT-1 | **non couverte** (comportement de l'automate) |
+| EF-EXT-2 | **non couverte** (comportement de l'automate) |
+| EF-EXT-3 | **non couverte** (comportement de l'automate) |
+| EF-EXT-4 | **non couverte** (comportement de l'automate) |
+| EF-EXT-5 | `tests/test_regions.py::test_regions_keep_only_uncertain_fields`, `tests/test_regions.py::test_regions_drop_pages_out_of_range_and_empty_boxes`, `tests/test_regions.py::test_regions_are_clamped_to_the_page`, `tests/test_regions.py::test_regions_ignore_garbage`, `tests/test_regions.py::test_schema_requires_regions`, `tests/test_regions.py::test_insert_invoice_stores_regions` |
+| EF-EXT-6 | **non couverte** |
+| EF-EXT-7 | `tests/test_photo_orientation.py::test_large_rotated_photo_is_sent_upright`, `tests/test_photo_orientation.py::test_small_rotated_photo_is_sent_upright`, `tests/test_photo_orientation.py::test_upright_photo_is_passed_through` |
+| EF-EXT-8 | `tests/test_import_log.py::test_failed_extraction_is_logged` |
+| EF-EXT-9 | **non couverte** |
+| EF-ACC-1 | `tests/test_home_route.py::test_home_shows_last_complete_month_only`, `tests/test_home_route.py::test_home_other_currency_is_a_chip_not_a_sum`, `tests/test_dashboard.py::test_last_complete_month_regular`, `tests/test_dashboard.py::test_last_complete_month_january`, `tests/test_dashboard.py::test_main_currency_by_count` |
+| EF-ACC-2 | `tests/test_db_home.py::test_count_uncertain_ignores_errors` (partielle : le compte de factures du mois n'est pas testé) |
+| EF-ACC-3 | `tests/test_dashboard.py::test_month_window_includes_current_month_and_crosses_year`, `tests/test_charts.py::test_monthly_columns_marks_current_month`, `tests/test_db_home.py::test_monthly_series_fills_missing_months` |
+| EF-ACC-4 | `tests/test_charts.py::test_heatmap_tooltip_data`, `tests/test_home_route.py::test_heatmap_never_mixes_currencies_when_window_is_empty` (partielle : limites de 12 fournisseurs et 45 jours non testées) |
+| EF-ACC-5 | `tests/test_home_route.py::test_home_lists_three_latest_imports`, `tests/test_dashboard.py::test_top_price_alerts_keeps_three_highest_drifts`, `tests/test_db_home.py::test_latest_batch_none_then_most_recent`, `tests/test_home_route.py::test_running_import_shows_time_remaining` |
+| EF-ACC-6 | `tests/test_home_route.py::test_home_has_no_filters_and_no_scale_toggle` |
+| EF-FAC-1 | `tests/test_invoice_list.py::test_page_lists_rows_with_state_and_has_detail_pane` (partielle : la sélection dans l'adresse est du JavaScript, non testé) |
+| EF-FAC-2 | `tests/test_invoice_list.py::test_sort_orders_put_missing_values_last`, `tests/test_invoice_list.py::test_status_counts_ignore_the_status_filter`, `tests/test_invoice_list.py::test_status_links_keep_other_filters` |
+| EF-FAC-3 | `tests/test_invoice_list.py::test_invoices_page_has_no_duplicates_panel_and_keeps_sort_in_pagination` |
+| EF-FAC-4 | `tests/test_pages_route.py::test_pdf_page_is_rendered_as_png`, `tests/test_pages_route.py::test_page_out_of_range_is_404`, `tests/test_pages_route.py::test_api_detail_reports_pages_and_regions` (partielle : zoom et déplacement sont du JavaScript, non testé) |
+| EF-FAC-5 | **non couverte** (JavaScript) |
+| EF-FAC-6 | `tests/test_invoice_review.py::test_correcting_a_field_removes_its_region`, `tests/test_invoice_review.py::test_confirmed_then_corrected_field_is_marked_edited` (partielle : le rattachement de la saisie à la bonne facture est du JavaScript, non testé) |
+| EF-FAC-7 | `tests/test_invoice_review.py::test_confirm_removes_doubt_and_region_and_records_confirmation`, `tests/test_invoice_review.py::test_validate_confirms_every_doubtful_field`, `tests/test_invoice_review.py::test_validate_refuses_an_invoice_in_error` |
+| EF-FAC-8 | **non couverte** |
+| EF-FAC-9 | **non couverte** (mise en page) |
+| EF-PRO-1 | **non couverte** |
+| EF-PRO-2 | **non couverte** |
+| EF-PRO-3 | **non couverte** |
+| EF-PRO-4 | **non couverte** |
+| EF-PRO-5 | **non couverte** |
+| EF-PRO-6 | **non couverte** |
+| EF-REG-1 | `tests/test_invoice_review.py::test_confirm_removes_doubt_and_region_and_records_confirmation` (partielle : l'enregistrement d'une correction n'est vérifié qu'indirectement) |
+| EF-REG-2 | `tests/test_learning.py::test_confirmations_are_described_as_such`, `tests/test_learning.py::test_rule_prompt_explains_confirmations` (partielle : la consigne envoyée seulement, pas l'affinage d'une règle) |
+| EF-REG-3 | `tests/test_invoice_review.py::test_confirmations_reach_the_learning_threshold` |
+| EF-REG-4 | **non couverte** |
+| EF-REG-5 | **non couverte** |
+| EF-ADM-1 | **non couverte** |
+| EF-ADM-2 | **non couverte** |
+| EF-ADM-3 | **non couverte** |
+| ENF-PERF-1 | **non couverte** |
+| ENF-PERF-2 | **non couverte** |
+| ENF-PERF-3 | **non couverte** |
+| ENF-PERF-4 | **non couverte** |
+| ENF-PERF-5 | **non couverte** |
+| ENF-PERF-6 | `tests/test_invoice_review.py::test_confirm_learns_off_the_event_loop`, `tests/test_invoice_review.py::test_correction_learns_off_the_event_loop` |
+| ENF-STO-1 | **non couverte** |
+| ENF-STO-2 | **non couverte** |
+| ENF-STO-3 | **non couverte** |
+| ENF-STO-4 | **non couverte** |
+| ENF-SEC-1 | `tests/test_home_route.py::test_home_escapes_supplier_names` (partielle : accueil seulement ; le script et les autres pages ne sont pas testés) |
+| ENF-SEC-2 | **non couverte** |
+| ENF-SEC-3 | **non couverte** |
+| ENF-SEC-4 | **non couverte** |
+| ENF-SEC-5 | **non couverte** |
+| ENF-SEC-6 | **non couverte** |
+| ENF-SEC-7 | **non couverte** |
+| ENF-SEC-8 | **non couverte** |
+| ENF-SEC-9 | **non couverte** |
+| ENF-SEC-10 | **non couverte** |
+| ENF-SEC-11 | `tests/test_pages_route.py::test_pdf_page_is_rendered_as_png` (partielle : images de pages seulement) |
+| ENF-SEC-12 | `tests/test_invoice_review.py::test_confirm_rejects_a_field_that_is_not_doubtful` (partielle : la confirmation seulement, pas la correction) |
+| ENF-ISO-1 | **non couverte** |
+| ENF-ISO-2 | **non couverte** |
+| ENF-ISO-3 | `tests/test_migrations.py::test_old_database_gets_new_columns_and_log`, `tests/test_migrations.py::test_duplicates_are_copied_only_once` |
+| ENF-COMP-1 | **non couverte** |
+| ENF-COMP-2 | **non couverte** |
+| ENF-COMP-3 | **non couverte** |
+| ENF-UI-1 | **non couverte** |
+| ENF-UI-2 | **non couverte** |
+| ENF-UI-3 | **non couverte** |
+| ENF-UI-4 | `tests/test_charts.py::test_heat_stops_lightness_strictly_decreases`, `tests/test_charts.py::test_heatmap_tooltip_data` |
+| ENF-UI-5 | **non couverte** |
