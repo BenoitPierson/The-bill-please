@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo Rappel de workflow pour The Bill Please, dans cet ordre strict : 1) avant toute modification, lancer la phase de reflexion superpowers:brainstorming et clarifier le besoin avec l'utilisateur ; 2) rediger un plan (superpowers:writing-plans) et le faire valider avant tout code ; 3) seulement ensuite ecrire le code, pour une modification d'interface utiliser la skill emil-design-eng ; 4) chaque modification part d'une nouvelle branche creee depuis origin/main, jamais depuis main directement."
+            "command": "echo \"Rappel de workflow pour The Bill Please, dans cet ordre strict, avec le plugin chef-de-projet : 1) avant toute modification, lancer chef-de-projet:cadrage et clarifier le besoin avec l utilisateur ; 2) rediger les specs fonctionnelle et technique puis le plan avec chef-de-projet:specs-redac, et les faire valider avant tout code ; 3) seulement ensuite ecrire le code avec chef-de-projet:exec-plan ou chef-de-projet:exec-par-sous-agent, tests en premier, et pour une modification de l interface utiliser les skills emil-design-eng et apple-design ; 4) chaque modification part d une nouvelle branche creee depuis origin/main, jamais depuis main directement ; 5) avant la pull request, chef-de-projet:fin-dev-branch lance chef-de-projet:conformite-archi.\""
           }
         ]
       }
